@@ -1,1 +1,9 @@
-collect
+/target
+*~
+
+# Profiling
+*.png
+*.svg
+perf.*
+vgcore.*
+
