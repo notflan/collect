@@ -14,8 +14,11 @@ use std::{
     num::NonZeroUsize,
 };
 
+mod buffers;
+use buffers::prelude::*;
+
+#[cfg(feature="bytes")]
 use bytes::{
-    BytesMut,
     Buf,
     BufMut,
 };
@@ -45,16 +48,14 @@ where R: AsRawFd
 fn main() -> io::Result<()> {
     let (bytes, read) = {
 	let stdin = io::stdin();
-	let mut bytes = match try_get_size(&stdin) {
-	    Some(sz) => BytesMut::with_capacity(sz.into()),
-	    None => BytesMut::new(),
-	};
+	let mut bytes: buffers::DefaultMut = try_get_size(&stdin).create_buffer();
 	
 	let read = io::copy(&mut stdin.lock(), &mut (&mut bytes).writer())?;
 	(bytes.freeze(), read as usize)
     };
 
-    let written = io::copy(&mut bytes.slice(..read).reader() , &mut io::stdout().lock())?;
+    let written = 
+	io::copy(&mut (&bytes[..read]).reader() , &mut io::stdout().lock())?;
 
     if read != written as usize {
 	return Err(io::Error::new(io::ErrorKind::BrokenPipe, format!("read {read} bytes, but only wrote {written}")));
