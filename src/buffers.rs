@@ -21,7 +21,6 @@ pub type Default = <DefaultMut as MutBuffer>::Frozen;
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BufferReader<'a, B: ?Sized>(&'a mut B, usize);
 
-
 /// Writer to a mutable reference of a `MutBuffer`.
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BufferWriter<'a, B: ?Sized>(&'a mut B, usize);
@@ -96,10 +95,13 @@ impl<'a, B: ?Sized + Buffer> io::Read for BufferReader<'a, B>
 impl<'a, B: ?Sized + MutBuffer> io::Write for BufferWriter<'a, B>
 {
     #[inline]
+    #[instrument(skip(self))]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 	let adv = self.0.copy_from_slice(self.1, buf);
+	
 	self.1 += adv;
-	Ok(adv)
+	Ok(adv) 
+	    
     }
     #[inline(always)] 
     fn flush(&mut self) -> io::Result<()> {
@@ -157,13 +159,17 @@ pub trait MutBuffer: AsMut<[u8]>
     /// Make immutable
     fn freeze(self) -> Self::Frozen;
 
-    #[inline] 
+    #[inline]
+    #[instrument(skip(self))]
     fn copy_from_slice(&mut self, st: usize, slice: &[u8]) -> usize
     {
 	let by = self.as_mut();
+	dbg!(&by);
+
 	if st >= by.len() {
 	    return 0;
 	}
+	dbg!(st);
 
 	let by = &mut by[st..];
 	let len = std::cmp::min(by.len(), slice.len());
@@ -180,12 +186,14 @@ pub trait MutBuffer: AsMut<[u8]>
 
 pub trait MutBufferExt: MutBuffer
 {
-    #[inline(always)] 
+    #[inline(always)]
+    #[instrument(skip(self))]
     fn writer_from(&mut self, st: usize) -> BufferWriter<'_, Self>
     {
 	BufferWriter(self, st)
     }
-    #[inline] 
+    #[inline]
+    #[instrument(skip(self))]
     fn writer(&mut self) -> BufferWriter<'_, Self>
     {
 	self.writer_from(0)
@@ -201,14 +209,34 @@ impl MutBuffer for bytes::BytesMut
     fn freeze(self) -> Self::Frozen {
 	bytes::BytesMut::freeze(self)
     }
+    //TODO: XXX: Impl copy_from_slice() as is done in impl for Vec<u8>
 }
 
 impl MutBuffer for Vec<u8>
 {
     type Frozen = Box<[u8]>;
     #[inline]
+    #[instrument]
     fn freeze(self) -> Self::Frozen {
 	self.into_boxed_slice()
+    }
+
+    #[instrument]
+    fn copy_from_slice(&mut self, st: usize, buf: &[u8]) -> usize
+    {
+	if  (st + buf.len()) <= self.len() {
+	    // We can put `buf` in st..buf.len()
+	    self[st..].copy_from_slice(buf);
+	} else if  st <= self.len() {
+	    // The start is lower but the end is not
+	    let rem = self.len() - st;
+	    self[st..].copy_from_slice(&buf[..rem]);
+	    self.extend_from_slice(&buf[rem..]);
+	} else {
+	    // it is past the end, extend.
+	    self.extend_from_slice(buf);
+	}
+	buf.len()
     }
 }
 

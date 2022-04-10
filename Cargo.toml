@@ -10,6 +10,7 @@ default = ["jemalloc"]
 
 # TODO: mmap, memfd_create() ver
 
+# XXX: without bytes, it completely fails??
 # bytes: use `bytes` crate for collecting instead of `std::vec`
 
 # Use jemalloc instead of system malloc.
@@ -29,5 +30,9 @@ strip=false
 
 [dependencies]
 bytes = {version = "1.1.0", optional = true }
+color-eyre = { version = "0.6.1", features = ["capture-spantrace"] }
 jemallocator = { version = "0.3.2", optional = true }
 libc = "0.2.122"
+tracing = { version = "0.1.33", features = ["attributes"] }
+tracing-error = "0.2.0"
+tracing-subscriber = { version = "0.3.11", features = ["tracing", "env-filter"] }
