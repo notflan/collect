@@ -85,10 +85,11 @@ const _: () = {
 impl<'a, B: ?Sized + Buffer> io::Read for BufferReader<'a, B>
 {
     #[inline] 
-    #[instrument(level="trace", skip_all, fields(buf = ?buf.len()))]
+    #[cfg_attr(feature="logging", instrument(level="trace", skip_all, fields(buf = ?buf.len())))]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 	let adv = self.0.copy_to_slice(self.1, buf);
 	self.1 += adv;
+	if_trace!(? trace!(" -> reading one buffer +{adv}"));
 	Ok(adv)
     }
 }
@@ -96,11 +97,13 @@ impl<'a, B: ?Sized + Buffer> io::Read for BufferReader<'a, B>
 impl<'a, B: ?Sized + MutBuffer> io::Write for BufferWriter<'a, B>
 {
     #[inline]
-    #[instrument(level="trace", skip_all, fields(buf = ?buf.len()))]
+    #[cfg_attr(feature="logging", instrument(level="trace", skip_all, fields(buf = ?buf.len())))]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 	let adv = self.0.copy_from_slice(self.1, buf);
 	
 	self.1 += adv;
+	
+	if_trace!(? trace!(" <- writing one buffer {adv}"));
 	Ok(adv) 
 	    
     }
@@ -114,7 +117,7 @@ impl<'a, B: ?Sized + MutBuffer> io::Write for BufferWriter<'a, B>
 pub trait Buffer: AsRef<[u8]>
 {
     #[inline]
-    #[instrument(level="trace", skip_all, fields(buf = ?slice.len()))]
+    #[cfg_attr(feature="logging", instrument(level="trace", skip_all, fields(buf = ?slice.len())))]
     fn copy_to_slice(&self, st: usize, slice: &mut [u8]) -> usize
     {
 	let by = self.as_ref();
@@ -162,7 +165,7 @@ pub trait MutBuffer: AsMut<[u8]>
     fn freeze(self) -> Self::Frozen;
 
     #[inline]
-    #[instrument(level="debug", skip_all, fields(st, buflen = ?slice.len()))]
+    #[cfg_attr(feature="logging", instrument(level="debug", skip_all, fields(st, buflen = ?slice.len())))]
     fn copy_from_slice(&mut self, st: usize, slice: &[u8]) -> usize
     {
 	let by = self.as_mut();
@@ -189,10 +192,10 @@ pub trait MutBuffer: AsMut<[u8]>
 pub trait MutBufferExt: MutBuffer
 {
     #[inline(always)]
-    #[instrument(level="info", skip(self))]
+    #[cfg_attr(feature="logging", instrument(level="info", skip(self)))]
     fn writer_from(&mut self, st: usize) -> BufferWriter<'_, Self>
     {
-	debug!("creating writer at start {st}");
+	if_trace!(debug!("creating writer at start {st}"));
 	BufferWriter(self, st)
     }
     #[inline]
@@ -210,7 +213,7 @@ impl MutBuffer for bytes::BytesMut
     type Frozen = bytes::Bytes;
     
     #[inline(always)]
-    #[instrument(level="trace")]
+    #[cfg_attr(feature="logging", instrument(level="trace"))]
     fn freeze(self) -> Self::Frozen {
 	bytes::BytesMut::freeze(self)
     }
@@ -222,7 +225,7 @@ impl MutBuffer for bytes::BytesMut
     if  (st + buf.len()) <= self.len() {
     // We can put `buf` in st..buf.len()
     self[st..].copy_from_slice(buf); 
-} else if  st <= self.len() {
+} else if  st < self.len() {
     // The start is lower but the end is not
     let rem = self.len() - st;
     self[st..].copy_from_slice(&buf[..rem]);
@@ -235,29 +238,150 @@ impl MutBuffer for bytes::BytesMut
 }*/
 }
 
+#[cfg(feature="recolored")] 
+mod perc { 
+    #[deprecated = "this is absolutely retardedly unsafe and unsound... fuck this shit man lole"]
+    pub(super) unsafe fn gen_perc_boring(low: f64, high: f64) -> std::pin::Pin<&'static (impl std::fmt::Display + ?Sized + 'static)>
+    {
+	use std::{
+	    cell::RefCell,
+	    mem::MaybeUninit,
+	    pin::Pin,
+	    
+	};
+	thread_local! {
+	    static STRING_BUFFER: RefCell<MaybeUninit<[u8; 16]>> = RefCell::new(MaybeUninit::uninit());
+	}
+	STRING_BUFFER.try_with(|buffer| -> Result<std::pin::Pin<&'static str>, Box<dyn std::error::Error + 'static>>{
+	    let mut buffer = buffer.try_borrow_mut()?;
+	    use std::io::Write;
+	    write!(unsafe {&mut buffer.assume_init_mut()[..]}, "{:0.2}", (low / high) * 100f64)?;
+	    let s_ref = unsafe {
+		#[derive(Debug)]
+		struct FindFailed;
+		impl std::error::Error for FindFailed{}
+		impl std::fmt::Display for FindFailed {
+		    #[inline(always)] 
+		    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+		    {
+			f.write_str("boring perc: failed to write whole string into buffer of size 16")
+		    }
+		}
+		let buf = buffer.assume_init_mut();
+		let spl = memchr::memchr(b'%', &buf[..]).ok_or(FindFailed)?;
+		std::str::from_utf8_mut(&mut buf[..=spl])?
+	    };
+	    unsafe {
+		Ok(Pin::new(std::mem::transmute::<_, &'static _>(s_ref)))
+	    }
+	}).expect("bad static memory access").expect("failed to calc")
+    }
+
+    #[inline]
+    //XXX::: WHY::: TRACING IGNORES MY COLOURS!!!
+    #[deprecated(note="my colouring is ignored. we'll have to either: figure out why. or, use a different method to highlight abnormal (above 100) percentages")]
+    pub(super) fn gen_perc(low: f64, high: f64) -> impl std::fmt::Display
+    {
+	use std::fmt;
+	let f = low / match high {
+	    0f64 => if low != 0f64 {
+		return Perc::Invalid
+	    } else {
+		0f64
+	    }
+	    x => x,
+	};
+	enum Perc {
+	    Normal(f64),
+	    Goal(String),
+	    High(String),
+	    Zero(String),
+	    Low(String),
+	    
+	    Invalid,
+	}
+	
+	macro_rules! fmt_str {
+	    (%) => ("{:0.2}%");
+	    () => ("{:0.2}")
+	}
+	impl fmt::Display for Perc
+	{
+	    #[inline(always)] 
+	    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+	    {
+		use recolored::Colorize;
+
+		write!(f, "{}", match self {
+		    Self::Normal(p) => return write!(f, fmt_str!(%), p),
+		    Self::Goal(p) => p.green(),
+		    Self::High(p) => p.red(),
+		    Self::Zero(p) => p.purple().bold(),
+		    Self::Low(p) => p.on_red().white().underline(),
+		    Self::Invalid => return write!(f, fmt_str!(%), ("0.00%".on_bright_red().white().strikethrough())),
+		})?;
+		{
+		    use fmt::Write;
+		    f.write_char('%')
+		}
+	    }
+	}
+
+	//TODO: StackStr instead of String
+	(match f {
+	    0f64 => Perc::Zero,
+	    1f64 => Perc::Goal,
+	    0f64..=1f64 => return Perc::Normal(f * 100f64),
+	    1f64.. => Perc::High,
+	    _ => Perc::Low,
+	})(format!(fmt_str!(), f * 100f64))
+    }
+}
+
 impl MutBuffer for Vec<u8>
 {
     type Frozen = Box<[u8]>;
     
     #[inline]
-    #[instrument(level="trace")]
+    #[cfg_attr(feature="logging", instrument(level="trace"))]
     fn freeze(self) -> Self::Frozen {
 	self.into_boxed_slice()
     }
 
-    #[instrument(level="trace", skip_all, fields(st, buflen = ?buf.len()))]
+    #[cfg_attr(feature="logging", instrument(level="trace", skip(buf, self), fields(st = ?st, self = ?self.len(), alloc= ?self.capacity())))]
     fn copy_from_slice(&mut self, st: usize, buf: &[u8]) -> usize
     {
 	if  (st + buf.len()) <= self.len() {
 	    // We can put `buf` in st..buf.len()
 	    self[st..].copy_from_slice(buf);
-	} else if  st <= self.len() {
+	} else if  st < self.len() {
 	    // The start is lower but the end is not
 	    let rem = self.len() - st;
 	    self[st..].copy_from_slice(&buf[..rem]);
+	    if_trace!(trace!("extending buffer (partial, +{})", buf[rem..].len()));
 	    self.extend_from_slice(&buf[rem..]);
 	} else {
 	    // it is past the end, extend.
+	    if_trace!(trace!("extending buffer (whole, self + buf = {} / {}: {})"
+			     ,self.len() + buf.len()
+			     , self.capacity()
+			     , {
+				 cfg_if! {
+				     if #[cfg(feature="recolored")] {
+					 use perc::*;
+					 (if cfg!(feature="recolored") {
+					     |x,y| -> Box<dyn std::fmt::Display> { Box::new(gen_perc(x,y)) }
+					 } else {
+					     |x,y| -> Box<dyn std::fmt::Display> { Box::new(unsafe {gen_perc_boring(x,y)}.get_ref()) }
+					 })((self.len() + buf.len()) as f64, self.capacity() as f64)
+				     } else {
+					 let t= self.len();
+					 let c= self.capacity();
+					 let b = buf.len();
+					 lazy_format::lazy_format!("{:0.2}", ((t + b) as f64 / c as f64) * 100f64)
+				     }
+				 }
+			     }));
 	    self.extend_from_slice(buf);
 	}
 	buf.len()
@@ -274,15 +398,15 @@ pub trait WithCapacity: Sized
 impl WithCapacity for Box<[u8]>
 {
     #[inline(always)]
-    #[instrument(level="info", fields(cap = "(unbound)"))]
+    #[cfg_attr(feature="logging", instrument(level="info", fields(cap = "(unbound)")))]
     fn wc_new() -> Self {
-	info!("creating new boxed slice with size 0");
+	if_trace!(debug!("creating new boxed slice with size 0"));
 	Vec::wc_new().into_boxed_slice()
     }
     #[inline(always)]
-    #[instrument(level="info")]
+    #[cfg_attr(feature="logging", instrument(level="info"))]
     fn wc_with_capacity(cap: usize) -> Self {
-	info!("creating new boxed slice with size {cap}");
+	if_trace!(debug!("creating new boxed slice with size {cap}"));
 	Vec::wc_with_capacity(cap).into_boxed_slice()
     }
 }
@@ -337,17 +461,17 @@ macro_rules! cap_buffer  {
 	impl $crate::buffers::WithCapacity for $name
 	{
 	    #[inline(always)]
-	    #[instrument(level="info", fields(cap = "(unbound)"))]
+	    #[cfg_attr(feature="logging", instrument(level="info", fields(cap = "(unbound)")))]
 	    fn wc_new() -> Self
 	    {
-		info!("creating {} with no cap", std::any::type_name::<Self>());
+		if_trace! (debug!("creating {} with no cap", std::any::type_name::<Self>()));
 		Self::new()
 	    }
 	    #[inline(always)]
-	    #[instrument(level="info")]
+	    #[cfg_attr(feature="logging", instrument(level="info"))]
 	    fn wc_with_capacity(cap: usize) -> Self
 	    {
-		info!("creating {} with {cap}", std::any::type_name::<Self>());
+		if_trace!(debug!("creating {} with {cap}", std::any::type_name::<Self>()));
 		Self::with_capacity(cap)
 	    }
 	}
