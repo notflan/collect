@@ -37,6 +37,7 @@ use bytes::{
     BufMut,
 };
 
+#[instrument(level="debug", skip(reader), fields(reader = ?std::any::type_name::<R>()))]
 fn try_get_size<R: ?Sized>(reader: &R) -> Option<NonZeroUsize>
 where R: AsRawFd
 {
@@ -70,33 +71,43 @@ fn init() -> eyre::Result<()>
 	use tracing_subscriber::prelude::*;
 	use tracing_subscriber::{fmt, EnvFilter};
 
-	let fmt_layer = fmt::layer().with_target(false);
+	let fmt_layer = fmt::layer()
+	    .with_target(false)
+	    .with_writer(io::stderr);
+	
 	let filter_layer = EnvFilter::try_from_default_env()
-	    .or_else(|_| EnvFilter::try_new("info"))
+	    .or_else(|_| EnvFilter::try_new(if cfg!(debug_assertions) {
+		"info"
+	    } else if cfg!(feature="no-logging") {
+		"off"
+	    } else {
+		"warn"
+	    }))
 	    .unwrap();
 
 	tracing_subscriber::registry()
-	    .with(filter_layer)
 	    .with(fmt_layer)
+	    .with(filter_layer)
 	    .with(ErrorLayer::default())
 	    .init();
     }
-    
-    install_tracing();
+
+    //if !cfg!(feature="no-logging") {
+	install_tracing();
+    //}
     
     color_eyre::install()
 }
 
-#[instrument]
+#[instrument(err)]
 fn main() -> eyre::Result<()> {
     init()?;
-    //info!("Initialised");
     
     let (bytes, read) = {
 	let stdin = io::stdin();
 	let mut bytes: buffers::DefaultMut = try_get_size(&stdin).create_buffer();
 	
-	let read = io::copy(&mut stdin.lock(), &mut bytes.writer())
+	let read = io::copy(&mut stdin.lock(), &mut (&mut bytes).writer())
 	    .with_section(|| bytes.len().header("Buffer size is"))
 	    .with_section(|| bytes.capacity().header("Buffer cap is"))
 	    .with_section(|| format!("{:?}", bytes).header("Buffer is"))

@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["jemalloc"]
+default = ["jemalloc", "tracing/release_max_level_warn"]
 
 # TODO: mmap, memfd_create() ver
 
@@ -16,6 +16,9 @@ default = ["jemalloc"]
 # Use jemalloc instead of system malloc.
 # Seems to reduce overall memory usage at the cost of a very small speed drop.
 jemalloc = ["jemallocator"]
+
+# Remove all tracing points
+no-logging = ["tracing/max_level_off"]
 
 [profile.release]
 opt-level = 3
@@ -29,7 +32,7 @@ inherits="release"
 strip=false
 
 [dependencies]
-bytes = {version = "1.1.0", optional = true }
+bytes = { version = "1.1.0", optional = true }
 color-eyre = { version = "0.6.1", features = ["capture-spantrace"] }
 jemallocator = { version = "0.3.2", optional = true }
 libc = "0.2.122"

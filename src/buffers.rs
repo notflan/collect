@@ -85,6 +85,7 @@ const _: () = {
 impl<'a, B: ?Sized + Buffer> io::Read for BufferReader<'a, B>
 {
     #[inline] 
+    #[instrument(level="trace", skip_all, fields(buf = ?buf.len()))]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 	let adv = self.0.copy_to_slice(self.1, buf);
 	self.1 += adv;
@@ -95,7 +96,7 @@ impl<'a, B: ?Sized + Buffer> io::Read for BufferReader<'a, B>
 impl<'a, B: ?Sized + MutBuffer> io::Write for BufferWriter<'a, B>
 {
     #[inline]
-    #[instrument(skip(self))]
+    #[instrument(level="trace", skip_all, fields(buf = ?buf.len()))]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 	let adv = self.0.copy_from_slice(self.1, buf);
 	
@@ -112,7 +113,8 @@ impl<'a, B: ?Sized + MutBuffer> io::Write for BufferWriter<'a, B>
 /// An immutable contiguous buffer
 pub trait Buffer: AsRef<[u8]>
 {
-    #[inline] 
+    #[inline]
+    #[instrument(level="trace", skip_all, fields(buf = ?slice.len()))]
     fn copy_to_slice(&self, st: usize, slice: &mut [u8]) -> usize
     {
 	let by = self.as_ref();
@@ -160,7 +162,7 @@ pub trait MutBuffer: AsMut<[u8]>
     fn freeze(self) -> Self::Frozen;
 
     #[inline]
-    #[instrument(skip(self))]
+    #[instrument(level="debug", skip_all, fields(st, buflen = ?slice.len()))]
     fn copy_from_slice(&mut self, st: usize, slice: &[u8]) -> usize
     {
 	let by = self.as_mut();
@@ -187,13 +189,14 @@ pub trait MutBuffer: AsMut<[u8]>
 pub trait MutBufferExt: MutBuffer
 {
     #[inline(always)]
-    #[instrument(skip(self))]
+    #[instrument(level="info", skip(self))]
     fn writer_from(&mut self, st: usize) -> BufferWriter<'_, Self>
     {
+	debug!("creating writer at start {st}");
 	BufferWriter(self, st)
     }
     #[inline]
-    #[instrument(skip(self))]
+    //#[instrument(level="info", skip(self))]
     fn writer(&mut self) -> BufferWriter<'_, Self>
     {
 	self.writer_from(0)
@@ -205,23 +208,44 @@ impl<B: ?Sized + MutBuffer> MutBufferExt for B{}
 impl MutBuffer for bytes::BytesMut
 {
     type Frozen = bytes::Bytes;
-    #[inline(always)] 
+    
+    #[inline(always)]
+    #[instrument(level="trace")]
     fn freeze(self) -> Self::Frozen {
 	bytes::BytesMut::freeze(self)
     }
     //TODO: XXX: Impl copy_from_slice() as is done in impl for Vec<u8>
+    /*#[instrument]
+    fn copy_from_slice(&mut self, st: usize, buf: &[u8]) -> usize
+    {
+    //TODO: Special case for `st == 0` maybe? No slicing of the BytesMut might increase perf? Idk.
+    if  (st + buf.len()) <= self.len() {
+    // We can put `buf` in st..buf.len()
+    self[st..].copy_from_slice(buf); 
+} else if  st <= self.len() {
+    // The start is lower but the end is not
+    let rem = self.len() - st;
+    self[st..].copy_from_slice(&buf[..rem]);
+    self.extend_from_slice(&buf[rem..]);
+} else {
+    // it is past the end, extend.
+    self.extend_from_slice(buf);
+}
+    buf.len()
+}*/
 }
 
 impl MutBuffer for Vec<u8>
 {
     type Frozen = Box<[u8]>;
+    
     #[inline]
-    #[instrument]
+    #[instrument(level="trace")]
     fn freeze(self) -> Self::Frozen {
 	self.into_boxed_slice()
     }
 
-    #[instrument]
+    #[instrument(level="trace", skip_all, fields(st, buflen = ?buf.len()))]
     fn copy_from_slice(&mut self, st: usize, buf: &[u8]) -> usize
     {
 	if  (st + buf.len()) <= self.len() {
@@ -249,12 +273,16 @@ pub trait WithCapacity: Sized
 
 impl WithCapacity for Box<[u8]>
 {
-    #[inline(always)] 
+    #[inline(always)]
+    #[instrument(level="info", fields(cap = "(unbound)"))]
     fn wc_new() -> Self {
+	info!("creating new boxed slice with size 0");
 	Vec::wc_new().into_boxed_slice()
     }
-    #[inline(always)] 
+    #[inline(always)]
+    #[instrument(level="info")]
     fn wc_with_capacity(cap: usize) -> Self {
+	info!("creating new boxed slice with size {cap}");
 	Vec::wc_with_capacity(cap).into_boxed_slice()
     }
 }
@@ -308,14 +336,18 @@ macro_rules! cap_buffer  {
     ($name:ty) => {
 	impl $crate::buffers::WithCapacity for $name
 	{
-	    #[inline(always)] 
+	    #[inline(always)]
+	    #[instrument(level="info", fields(cap = "(unbound)"))]
 	    fn wc_new() -> Self
 	    {
+		info!("creating {} with no cap", std::any::type_name::<Self>());
 		Self::new()
 	    }
-	    #[inline(always)] 
+	    #[inline(always)]
+	    #[instrument(level="info")]
 	    fn wc_with_capacity(cap: usize) -> Self
 	    {
+		info!("creating {} with {cap}", std::any::type_name::<Self>());
 		Self::with_capacity(cap)
 	    }
 	}
@@ -359,6 +391,8 @@ pub mod prelude
 }
 
 pub(crate) use cap_buffer;
+
+// cap_buffer impls
 
 #[cfg(feature="bytes")] buffers::cap_buffer!(bytes::BytesMut);
 cap_buffer!(Vec<u8>);
