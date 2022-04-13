@@ -14,7 +14,8 @@ default = ["jemalloc", "tracing/release_max_level_warn"]
 # bytes: use `bytes` crate for collecting instead of `std::vec`
 
 # Use jemalloc instead of system malloc.
-# Seems to reduce overall memory usage at the cost of a very small speed drop.
+#
+# Decreases memory-handling function calls, resulting in less "used" memory and faster allocation speeds at the cost of mapping a huge amount of virtual memory.
 jemalloc = ["jemallocator"]
 
 # Remove all tracing points
