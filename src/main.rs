@@ -3,7 +3,9 @@
 #[cfg(feature="logging")] 
 #[macro_use] extern crate tracing;
 
+#[cfg(feature="memfile")] 
 #[macro_use] extern crate lazy_static;
+#[cfg(feature="memfile")] 
 #[macro_use] extern crate stackalloc;
 
 /// Run this statement only if `tracing` is enabled
