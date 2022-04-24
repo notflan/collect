@@ -2,6 +2,11 @@
 use super::*;
 use std::{fmt, error};
 
+pub(super) fn raw_errno() -> libc::c_int
+{
+    unsafe { *libc::__errno_location() }
+}
+
 /// The kind of duplicate fd syscall that was attempted
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 pub enum DuplicateKind
@@ -117,7 +122,7 @@ pub enum MemfileCreationStep
     /// `memfd_create()` call
     Create(Option<String>, libc::c_uint),
     /// `fallocate()` call
-    Allocate(fd::RawFileDescriptor, usize),
+    Allocate(Option<fd::RawFileDescriptor>, usize),
     /// `mmap()` call
     Map {
 	addr: usize,
@@ -144,7 +149,8 @@ impl fmt::Display for MemfileCreationStep
 	    Self::Create(None, 0 | MEMFD_CREATE_FLAGS) => f.write_str("memfd_create()"),
 	    Self::Create(None, flags) => write!(f, "memfd_create(<unbound>, {flags})"),
 	    Self::Create(Some(name), flag) => write!(f, "memfd_create({name}, {flag})"),
-	    Self::Allocate(fd, size) => write!(f, "fallocate({fd}, 0, 0, {size})"),
+	    Self::Allocate(None, size) => write!(f, "checked_cast<off_t>({size})"),
+	    Self::Allocate(Some(fd), size) => write!(f, "fallocate({fd}, 0, 0, {size})"),
 	    Self::Map{ addr: 0, size, prot, flags, fd: Some(fd), offset } => write!(f, "mmap(NULL, {size}, {prot:?}, {flags}, {fd}, {offset})"),
 	    Self::Map{ addr: 0, size, prot, flags, fd: None, offset } => write!(f, "mmap(NULL, {size}, {prot:?}, {flags}, -1, {offset})"),
 	    Self::Map{ addr, size, prot, flags, fd: Some(fd), offset } => write!(f, "mmap(0x{addr:x}, {size}, {prot:?}, {flags}, {fd}, {offset})"),

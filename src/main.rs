@@ -82,10 +82,10 @@ struct StackStr<const MAXLEN: usize>(usize, std::mem::MaybeUninit<[u8; MAXLEN]>)
 
 impl<const SZ: usize> StackStr<SZ>
 {
-    #[inline] 
-    pub const fn new() -> Self
-    {
-	Self(0, std::mem::MaybeUninit::uninit())
+#[inline] 
+pub const fn new() -> Self
+{
+Self(0, std::mem::MaybeUninit::uninit())
     }
     
     #[inline(always)] 
@@ -220,10 +220,11 @@ fn init() -> eyre::Result<()>
     color_eyre::install()
 }
 
-#[cfg_attr(tracing, instrument(err))]
-fn main() -> eyre::Result<()> {
-    init()?;
-    if_trace!(debug!("initialised"));
+#[cfg_attr(feature="logging", instrument(err))]
+#[inline] 
+fn non_map_work() -> eyre::Result<()>
+{
+    if_trace!(trace!("strategy: allocated buffer"));
     
     let (bytes, read) = {
 	let stdin = io::stdin();
@@ -252,5 +253,35 @@ fn main() -> eyre::Result<()> {
 	    .wrap_err("Writing failed: size mismatch");
     }
     
+    Ok(())
+}
+
+#[cfg_attr(feature="logging", instrument(err))]
+#[inline]
+#[cfg(feature="memfile")] 
+fn map_work() -> eyre::Result<()>
+{
+    
+    if_trace!(trace!("strategy: mapped memory file"));
+
+    let file = memfile::create_memfile(Some("this is a test file"), 4096)?;
+    unimplemented!("Feature not yet implemented")
+}
+
+#[cfg_attr(feature="logging", instrument(err))]
+fn main() -> eyre::Result<()> {
+    init()?;
+    if_trace!(debug!("initialised"));
+
+    cfg_if!{ 
+	if #[cfg(feature="memfile")] {
+	    map_work()
+		.wrap_err(eyre!("Operation failed").with_note(|| "With mapped memfd algorithm"))?;
+	} else {
+	    non_map_work()
+		.wrap_err(eyre!("Operation failed").with_note(|| "With alloc-buf (non-mapped) algorithm"))?;
+	}
+    }
+
     Ok(())
 }

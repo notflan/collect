@@ -24,6 +24,25 @@ const MEMFD_CREATE_FLAGS: libc::c_uint = libc::MFD_CLOEXEC;
 #[repr(transparent)]
 pub struct RawFile(fd::RawFileDescriptor);
 
+/// Create an in-memory `File`, with an optional name
+#[cfg_attr(feature="logging", instrument(level="info", err))]
+pub fn create_memfile(name: Option<&str>, size: usize) -> eyre::Result<fs::File>
+{
+    if_trace!(debug!("Attempting to allocate {size} bytes of contiguous physical memory for memory file named {:?}", name.unwrap_or("<unbound>")));
+    RawFile::open_mem(name, size).map(Into::into)
+	.wrap_err(eyre!("Failed to open in-memory file")
+		  .with_section(move || format!("{:?}", name).header("Proposed name"))
+		  .with_section(|| size.header("Requested physical memory buffer size")))
+}
+
+impl Clone for RawFile
+{
+    #[inline] 
+    fn clone(&self) -> Self {
+	self.try_clone().expect("failed to duplicate raw fd")
+    }
+}
+
 impl RawFile
 {
     /// Get the raw fd for this raw file
@@ -97,6 +116,16 @@ impl RawFile
 	}
     }
 
+    /// Attempt to duplicate this raw file
+    pub fn try_clone(&self) -> Result<Self, error::DuplicateError>
+    {
+	match unsafe { libc::dup(self.0.get()) }
+	{
+	    -1 => Err(error::DuplicateError::new_dup(self)),
+	    fd => Ok(Self::take_ownership_of_unchecked(fd))
+	}
+    }
+
     /// Consume a managed file into a raw file, attempting to synchronise it first.
     ///
     /// # Note
@@ -146,6 +175,8 @@ impl RawFile
     }
 
     /// Open a new in-memory (W+R) file with an optional name and a fixed size.
+    
+    #[cfg_attr(feature="logging", instrument(err))]
     pub fn open_mem(name: Option<&str>, len: usize) -> Result<Self, error::MemfileError>
     {
 	lazy_static! {
@@ -160,19 +191,29 @@ impl RawFile
 
 	let rname = name.unwrap_or(&DEFAULT_NAME);
 	
-	stackalloc::alloca_zeroed(rname.len()+1, move |bname| { //XXX: Isn't the whole point of making `name` `&'static` that I don't know if `memfd_create()` requires static-lifetime name strings? TODO: Check this
+	stackalloc::alloca_zeroed(rname.len()+1,  move |bname| { //XXX: Isn't the whole point of making `name` `&'static` that I don't know if `memfd_create()` requires static-lifetime name strings? TODO: Check this
+	    #[cfg(feature="logging")] 
+	    let _span = info_span!("stack_name_cpy", size = bname.len());
+	    #[cfg(feature="logging")]
+	    let _span_lock = _span.enter();
+
 	    macro_rules! attempt_call
 	    {
 		($errcon:literal, $expr:expr, $step:expr) => {
+		    //if_trace!(debug!("attempting systemcall"));
 		    match unsafe {
 			$expr
 		    } {
-			$errcon => Err($step),
+			$errcon => {
+			    if_trace!(warn!("systemcall failed: {}", error::raw_errno()));
+			    Err($step)
+			},
 			x => Ok(x)
 		    }
 		}
 	    }
 
+	    if_trace!(trace!("copying {rname:p} `{rname}' (sz: {}) -> nul-terminated {:p}", rname.len(), bname));
 	    let bname = {
 		unsafe {
 		    std::ptr::copy_nonoverlapping(rname.as_ptr(), bname.as_mut_ptr(), rname.len());
@@ -186,11 +227,10 @@ impl RawFile
 	    
 	    attempt_call!(-1
 			  , fallocate(fd.0.get(), 0, 0, len.try_into()
-				      .map_err(|_| Allocate(fd.fileno().clone(), len))?)
-			  , Allocate(fd.fileno().clone(), len))?;
+				      .map_err(|_| Allocate(None, len))?)
+			  , Allocate(Some(fd.fileno().clone()), len))?;
 
 	    Ok(fd)
-		
 	})
     }
 }
@@ -268,14 +308,6 @@ impl From<RawFile> for fs::File
     }
 }
 
-
-impl Clone for RawFile
-{
-    #[inline] 
-    fn clone(&self) -> Self {
-	unsafe { Self::from_raw_fd(libc::dup(self.0.get())) }
-    }
-}
 impl ops::Drop for RawFile
 {
     #[inline] 
@@ -309,5 +341,31 @@ impl IntoRawFd for RawFile
 	let fd = self.0.get();
 	mem::forget(self); // prevent close
 	fd
+    }
+}
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+    #[test]
+    fn memory_mapping() -> eyre::Result<()>
+    {
+	use std::io::*;
+	const STRING: &[u8] = b"Hello world!";
+	let mut file = {
+	    let mut file = RawFile::open_mem(None, 4096)?;
+	    file.write_all(STRING)?;
+	    let mut file = fs::File::from(file);
+	    file.seek(SeekFrom::Start(0))?;
+	    file
+	};
+	let v: Vec<u8> = stackalloc::alloca_zeroed(STRING.len(), |buf| {
+	    file.read_exact(buf).map(|_| buf.into())
+	})?;
+
+	assert_eq!(v.len(), STRING.len(), "Invalid read size.");
+	assert_eq!(&v[..], &STRING[..], "Invalid read data.");
+	Ok(())
     }
 }
