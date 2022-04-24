@@ -3,6 +3,9 @@
 #[cfg(feature="logging")] 
 #[macro_use] extern crate tracing;
 
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate stackalloc;
+
 /// Run this statement only if `tracing` is enabled
 macro_rules! if_trace {
     (? $expr:expr) => {
@@ -47,6 +50,18 @@ use color_eyre::{
     Section,
     SectionExt, Help,
 };
+
+/// Get an `&'static str` of the current function name.
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            ::std::any::type_name::<T>()
+        }
+        let name = type_name_of(f);
+        &name[..name.len() - 3]
+    }}
+}
 
 mod buffers;
 use buffers::prelude::*;

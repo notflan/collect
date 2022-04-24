@@ -118,7 +118,7 @@ impl RawFileDescriptor
     pub const STDIN: Self = Self(unsafe { NonNegativeI32::new_unchecked(0) });
     pub const STDOUT: Self = Self(unsafe { NonNegativeI32::new_unchecked(1) });
     pub const STDERR: Self = Self(unsafe { NonNegativeI32::new_unchecked(2) });
-	
+    
     #[inline(always)] 
     pub fn try_new(fd: FileNo) -> Result<Self, BadFDError>
     {
@@ -142,7 +142,25 @@ impl RawFileDescriptor
     {
 	self.0.get()
     }
+
+    #[inline(always)] 
+    pub(super) const fn clone_const(&self) -> Self
+    {
+	//! **Internal**: `clone()` but useable in `memfile`-local `const fn`s
+	//! : since this type is essentially a `Copy` type, but without implicit copying.
+	Self(self.0)
+    }
 }
+
+impl fmt::Display for RawFileDescriptor
+{
+    #[inline(always)] 
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	write!(f, "{}", self.get())
+    }
+}
+
 
 impl PartialEq<FileNo> for RawFileDescriptor
 {
