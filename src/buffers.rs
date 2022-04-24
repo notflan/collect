@@ -217,7 +217,7 @@ impl MutBuffer for bytes::BytesMut
     fn freeze(self) -> Self::Frozen {
 	bytes::BytesMut::freeze(self)
     }
-    //TODO: XXX: Impl copy_from_slice() as is done in impl for Vec<u8>
+    //TODO: XXX: Impl copy_from_slice() as is done in impl for Vec<u8>? Or change how `.writer()` works for us to return the BytesMut writer which seems more efficient.
     /*#[instrument]
     fn copy_from_slice(&mut self, st: usize, buf: &[u8]) -> usize
     {

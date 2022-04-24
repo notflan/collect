@@ -51,6 +51,8 @@ use color_eyre::{
 mod buffers;
 use buffers::prelude::*;
 
+#[cfg(feature="memfile")] mod memfile;
+
 #[cfg(feature="bytes")]
 use bytes::{
     Buf,

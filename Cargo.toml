@@ -6,9 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["jemalloc", "logging", "tracing/release_max_level_warn"]
+default = ["jemalloc", "memfile", "logging", "tracing/release_max_level_warn"]
 
 # TODO: mmap, memfd_create() ver
+memfile = []
 
 # bytes: use `bytes` crate for collecting instead of `std::vec`
 
