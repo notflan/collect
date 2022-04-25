@@ -260,12 +260,19 @@ fn non_map_work() -> eyre::Result<()>
 #[inline]
 #[cfg(feature="memfile")] 
 fn map_work() -> eyre::Result<()>
-{
-    extern "C" {
-	fn getpagesize() -> libc::c_int;
-    }
-    /// 8 pages
-    const DEFAULT_BUFFER_SIZE: fn () -> Option<std::num::NonZeroUsize> = || { unsafe { std::num::NonZeroUsize::new((getpagesize() as usize) * 8) } }; 
+{        
+    const DEFAULT_BUFFER_SIZE: fn () -> Option<std::num::NonZeroUsize> = || {
+	cfg_if!{ 
+	    if #[cfg(feature="memfile-preallocate")]  {
+		extern "C" {
+		    fn getpagesize() -> libc::c_int;
+		}
+		unsafe { std::num::NonZeroUsize::new(getpagesize() as usize * 8) }
+	    } else {
+		std::num::NonZeroUsize::new(0)
+	    }
+	}
+    };
     
     if_trace!(trace!("strategy: mapped memory file"));
 
@@ -290,8 +297,15 @@ fn map_work() -> eyre::Result<()>
     let (mut file, read) = {
 	let stdin = io::stdin();
 
-	let buffsz = try_get_size(&stdin).or_else(DEFAULT_BUFFER_SIZE);
-	if_trace!(trace!("Attempted determining input size: {:?}", buffsz));
+	let buffsz = try_get_size(&stdin);
+	if_trace!(debug!("Attempted determining input size: {:?}", buffsz));
+	let buffsz = buffsz.or_else(DEFAULT_BUFFER_SIZE);
+	if_trace!(if let Some(buf) = buffsz.as_ref() {
+	    trace!("Failed to determine input size: preallocating to {}", buf);
+	} else {
+	    trace!("Failed to determine input size: alllocating on-the-fly (no preallocation)");
+	});
+	
 	let mut file = memfile::create_memfile(Some("collect-buffer"), 
 					       buffsz.map(|x| x.get()).unwrap_or(0))	    
 	    .with_section(|| format!("{:?}", buffsz).header("Deduced input buffer size"))
@@ -300,15 +314,72 @@ fn map_work() -> eyre::Result<()>
 	let read = io::copy(&mut stdin.lock(), &mut file)
 	    .with_section(|| format!("{:?}", file).header("Memory buffer file"))?;
 	
-	{
+	let read = if cfg!(any(feature="memfile-preallocate", debug_assertions)) {
 	    use io::*;
+	    let sp = file.stream_position();
+	    let sl = memfile::stream_len(&file);
+	    
+	    if_trace!(trace!("Stream position after read: {:?}", sp));
+	    if_trace!(trace!("Stream length after read: {:?}", sp));
+	    let read = match sp.as_ref() {
+		Ok(&v) if v != read  => {
+		    if_trace!(warn!("Reported read value not equal to memfile stream position: expected from `io::copy()`: {v}, got {read}"));
+		    v
+		},
+		Ok(&x) => {
+		    if_trace!(trace!("Reported memfile stream position and copy result equal: {x} == {}", read));
+		    x
+		},
+		Err(e) => {
+		    if_trace!(error!("Could not report memfile stream position, ignoring check on {read}: {e}"));
+		    read
+		},
+	    };
+
+	    let truncate_stream = |bad: u64, good: u64| {
+		use std::num::NonZeroU64;
+		use std::borrow::Cow;
+		file.set_len(good)
+		    .map(|_| good)
+		    .with_section(|| match NonZeroU64::new(bad) {Some (b) => Cow::Owned(b.get().to_string()), None => Cow::Borrowed("<unknown>") }.header("Original (bad) length"))
+		    .with_section(|| good.header("New (correct) length"))
+		    .wrap_err(eyre!("Failed to truncate stream to correct length")
+			      .with_section(|| format!("{:?}", file).header("Memory buffer file")))
+	    };
+	    
+	    let read = match sl.as_ref() {
+		Ok(&v) if v != read  => {
+		    if_trace!(warn!("Reported read value not equal to memfile stream length: expected from `io::copy()`: {read}, got {v}"));
+		    if_trace!(debug!("Attempting to correct memfile stream length from {v} to {read}"));
+		    
+		    truncate_stream(v, read)?
+		},
+		Ok(&v) => {
+		    if_trace!(trace!("Reported memfile stream length and copy result equal: {v} == {}", read));
+		    v
+		},
+		Err(e) => {
+		    if_trace!(error!("Could not report memfile stream length, ignoring check on {read}: {e}"));
+		    if_trace!(warn!("Attempting to correct memfile stream length anyway"));
+		    if let Err(e) = truncate_stream(0, read) {
+			if_trace!(error!("Truncate failed: {e}"));
+		    }
+		    
+		    read
+		}
+	    };
+	    
 	    file.seek(SeekFrom::Start(0))
 		.with_section(|| read.header("Actual read bytes"))
 		.wrap_err(eyre!("Failed to seek back to start of memory buffer file for output")
-			  .with_section(|| unwrap_int_string(file.stream_position()).header("Memfile position"))
+			  .with_section(|| unwrap_int_string(sp).header("Memfile position"))
 			  /*.with_section(|| file.stream_len().map(|x| x.to_string())
-					.unwrap_or_else(|e| format!("<unknown: {e}>")).header("Memfile full length"))*/)?;
-	}
+			  .unwrap_or_else(|e| format!("<unknown: {e}>")).header("Memfile full length"))*/)?;
+	    
+	    read
+	} else {
+	    read
+	};
 	
 	(file, usize::try_from(read)
 	 .wrap_err(eyre!("Failed to convert read bytes to `usize`")
@@ -317,7 +388,7 @@ fn map_work() -> eyre::Result<()>
 		   .with_suggestion(|| "It is likely you are running on a 32-bit ptr width machine and this input exceeds that of the maximum 32-bit unsigned integer value")
 		   .with_note(|| usize::MAX.header("Maximum value of `usize`")))?)
     };
-    if_trace!(info!("collected {read} from stdin. starting write."));
+    if_trace!(info!("collected {} from stdin. starting write.", read));
 
     let written =
 	io::copy(&mut file, &mut io::stdout().lock())

@@ -11,6 +11,9 @@ default = ["jemalloc", "memfile", "logging", "tracing/release_max_level_warn"] #
 # TODO: mmap, memfd_create() ver
 memfile = ["bitflags", "lazy_static", "stackalloc"]
 
+# When unable to determine the size of the input, preallocate the buffer to a multiple of the system page-size before writing to it. This can save extra `ftruncate()` calls, but will also result in the buffer needing to be truncated to the correct size at the end if the sizes as not matched.
+memfile-preallocate = ["memfile"]
+
 # bytes: use `bytes` crate for collecting instead of `std::vec`
 
 # Use jemalloc instead of system malloc.

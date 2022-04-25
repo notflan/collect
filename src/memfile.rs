@@ -24,6 +24,22 @@ const MEMFD_CREATE_FLAGS: libc::c_uint = libc::MFD_CLOEXEC;
 #[repr(transparent)]
 pub struct RawFile(fd::RawFileDescriptor);
 
+/// Attempt to get the length of a stream's file descriptor
+#[inline]
+#[cfg_attr(feature="logging", instrument(level="debug", err, skip_all, fields(from_fd = from.as_raw_fd())))]
+pub fn stream_len(from: &(impl AsRawFd + ?Sized)) -> io::Result<u64>
+{
+    let mut stat = std::mem::MaybeUninit::uninit();
+    match unsafe { libc::fstat(from.as_raw_fd(), stat.as_mut_ptr()) } {
+	-1 => Err(io::Error::last_os_error()),
+	_ => {
+	    let stat = unsafe { stat.assume_init() };
+	    debug_assert!(stat.st_size >= 0, "bad stat size");
+	    Ok(stat.st_size as u64)
+	},
+    }
+}
+
 /// Create an in-memory `File`, with an optional name
 #[cfg_attr(feature="logging", instrument(level="info", err))]
 pub fn create_memfile(name: Option<&str>, size: usize) -> eyre::Result<fs::File>
@@ -230,6 +246,16 @@ impl RawFile
 			      , fallocate(fd.0.get(), 0, 0, len.try_into()
 					  .map_err(|_| Allocate(None, len))?)
 			      , Allocate(Some(fd.fileno().clone()), len))?;
+		if cfg!(debug_assertions) {
+		    if_trace!(trace!("Allocated {len} bytes to memory buffer"));
+		    let seeked;
+		    assert_eq!(attempt_call!(-1
+					     , { seeked = libc::lseek(fd.0.get(), 0, libc::SEEK_CUR); seeked }
+					     , io::Error::last_os_error())
+			       .expect("Failed to check seek position in fd")
+			       , 0, "memfd seek position is non-zero after fallocate()");
+		    if_trace!(if seeked != 0 { warn!("Trace offset is non-zero: {seeked}") } else { trace!("Trace offset verified ok") });
+		}
 	    } else {
 		if_trace!(trace!("No length provided, skipping fallocate() call"));
 	    }
