@@ -224,11 +224,15 @@ impl RawFile
 
 	    let fd = attempt_call!(-1, memfd_create(bname as *const _, MEMFD_CREATE_FLAGS), Create(name.map(str::to_owned), MEMFD_CREATE_FLAGS))
 		.map(Self::take_ownership_of_unchecked)?; // Ensures `fd` is dropped if any subsequent calls fail
-	    
-	    attempt_call!(-1
-			  , fallocate(fd.0.get(), 0, 0, len.try_into()
-				      .map_err(|_| Allocate(None, len))?)
-			  , Allocate(Some(fd.fileno().clone()), len))?;
+
+	    if len > 0 {
+		attempt_call!(-1
+			      , fallocate(fd.0.get(), 0, 0, len.try_into()
+					  .map_err(|_| Allocate(None, len))?)
+			      , Allocate(Some(fd.fileno().clone()), len))?;
+	    } else {
+		if_trace!(trace!("No length provided, skipping fallocate() call"));
+	    }
 
 	    Ok(fd)
 	})

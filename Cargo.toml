@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["jemalloc", "logging", "tracing/release_max_level_warn"] #, "memfile" ]
+default = ["jemalloc", "memfile", "logging", "tracing/release_max_level_warn"] #, "memfile" ]
 
 # TODO: mmap, memfd_create() ver
 memfile = ["bitflags", "lazy_static", "stackalloc"]

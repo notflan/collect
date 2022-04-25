@@ -261,11 +261,77 @@ fn non_map_work() -> eyre::Result<()>
 #[cfg(feature="memfile")] 
 fn map_work() -> eyre::Result<()>
 {
+    extern "C" {
+	fn getpagesize() -> libc::c_int;
+    }
+    /// 8 pages
+    const DEFAULT_BUFFER_SIZE: fn () -> Option<std::num::NonZeroUsize> = || { unsafe { std::num::NonZeroUsize::new((getpagesize() as usize) * 8) } }; 
     
     if_trace!(trace!("strategy: mapped memory file"));
 
-    let file = memfile::create_memfile(Some("this is a test file"), 4096)?;
-    unimplemented!("Feature not yet implemented")
+    use std::borrow::Borrow;
+
+    #[inline(always)] 
+    fn tell_file<T>(file: &mut T) -> io::Result<u64>
+	where T: io::Seek + ?Sized
+    {
+	file.stream_position()
+    }
+
+    #[inline(always)] 
+    fn unwrap_int_string<T, E>(i: impl Borrow<Result<T, E>>) -> String
+    where T: std::fmt::Display,
+    E: std::fmt::Display
+    {
+	i.borrow().as_ref().map(ToString::to_string)
+	    .unwrap_or_else(|e| format!("<unknown: {e}>"))
+    }
+
+    let (mut file, read) = {
+	let stdin = io::stdin();
+
+	let buffsz = try_get_size(&stdin).or_else(DEFAULT_BUFFER_SIZE);
+	if_trace!(trace!("Attempted determining input size: {:?}", buffsz));
+	let mut file = memfile::create_memfile(Some("collect-buffer"), 
+					       buffsz.map(|x| x.get()).unwrap_or(0))	    
+	    .with_section(|| format!("{:?}", buffsz).header("Deduced input buffer size"))
+	    .wrap_err(eyre!("Failed to create in-memory buffer"))?;
+
+	let read = io::copy(&mut stdin.lock(), &mut file)
+	    .with_section(|| format!("{:?}", file).header("Memory buffer file"))?;
+	
+	{
+	    use io::*;
+	    file.seek(SeekFrom::Start(0))
+		.with_section(|| read.header("Actual read bytes"))
+		.wrap_err(eyre!("Failed to seek back to start of memory buffer file for output")
+			  .with_section(|| unwrap_int_string(file.stream_position()).header("Memfile position"))
+			  /*.with_section(|| file.stream_len().map(|x| x.to_string())
+					.unwrap_or_else(|e| format!("<unknown: {e}>")).header("Memfile full length"))*/)?;
+	}
+	
+	(file, usize::try_from(read)
+	 .wrap_err(eyre!("Failed to convert read bytes to `usize`")
+		   .with_section(|| read.header("Number of bytes was"))
+		   .with_section(|| u128::abs_diff(read.into(), usize::MAX as u128).header("Difference between `read` and `usize::MAX` is"))
+		   .with_suggestion(|| "It is likely you are running on a 32-bit ptr width machine and this input exceeds that of the maximum 32-bit unsigned integer value")
+		   .with_note(|| usize::MAX.header("Maximum value of `usize`")))?)
+    };
+    if_trace!(info!("collected {read} from stdin. starting write."));
+
+    let written =
+	io::copy(&mut file, &mut io::stdout().lock())
+	.with_section(|| read.header("Bytes read from stdin"))
+	.with_section(|| unwrap_int_string(tell_file(&mut file)).header("Current buffer position"))
+	.wrap_err("Failed to write buffer to stdout")?;
+    if_trace!(info!("written {written} to stdout."));
+
+    if read != written as usize {
+	return Err(io::Error::new(io::ErrorKind::BrokenPipe, format!("read {read} bytes, but only wrote {written}")))
+	    .wrap_err("Writing failed: size mismatch");
+    }
+    
+    Ok(())
 }
 
 #[cfg_attr(feature="logging", instrument(err))]
