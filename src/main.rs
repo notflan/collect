@@ -314,70 +314,78 @@ fn map_work() -> eyre::Result<()>
 	let read = io::copy(&mut stdin.lock(), &mut file)
 	    .with_section(|| format!("{:?}", file).header("Memory buffer file"))?;
 	
-	let read = if cfg!(any(feature="memfile-preallocate", debug_assertions)) {
+	let read =  {
 	    use io::*;
-	    let sp = file.stream_position();
-	    let sl = memfile::stream_len(&file);
-	    
-	    if_trace!(trace!("Stream position after read: {:?}", sp));
-	    if_trace!(trace!("Stream length after read: {:?}", sp));
-	    let read = match sp.as_ref() {
-		Ok(&v) if v != read  => {
-		    if_trace!(warn!("Reported read value not equal to memfile stream position: expected from `io::copy()`: {v}, got {read}"));
-		    v
-		},
-		Ok(&x) => {
-		    if_trace!(trace!("Reported memfile stream position and copy result equal: {x} == {}", read));
-		    x
-		},
-		Err(e) => {
-		    if_trace!(error!("Could not report memfile stream position, ignoring check on {read}: {e}"));
-		    read
-		},
+	    use std::borrow::Cow;
+
+	    let (read, sp, sl) = if cfg!(any(feature="memfile-preallocate", debug_assertions)) {
+		let sp = file.stream_position();
+		let sl = memfile::stream_len(&file);
+		
+		if_trace!(trace!("Stream position after read: {:?}", sp));
+		if_trace!(trace!("Stream length after read: {:?}", sp));
+		
+		let read = match sp.as_ref() {
+		    Ok(&v) if v != read  => {
+			if_trace!(warn!("Reported read value not equal to memfile stream position: expected from `io::copy()`: {v}, got {read}"));
+			v
+		    },
+		    Ok(&x) => {
+			if_trace!(trace!("Reported memfile stream position and copy result equal: {x} == {}", read));
+			x
+		    },
+		    Err(e) => {
+			if_trace!(error!("Could not report memfile stream position, ignoring check on {read}: {e}"));
+			read
+		    },
+		};
+
+		let truncate_stream = |bad: u64, good: u64| {
+		    use std::num::NonZeroU64;
+		    file.set_len(good)
+			.map(|_| good)
+			.with_section(|| match NonZeroU64::new(bad) {Some (b) => Cow::Owned(b.get().to_string()), None => Cow::Borrowed("<unknown>") }.header("Original (bad) length"))
+			.with_section(|| good.header("New (correct) length"))
+			.wrap_err(eyre!("Failed to truncate stream to correct length")
+				  .with_section(|| format!("{:?}", file).header("Memory buffer file")))
+		};
+		
+		let read = match sl.as_ref() {
+		    Ok(&v) if v != read  => {
+			if_trace!(warn!("Reported read value not equal to memfile stream length: expected from `io::copy()`: {read}, got {v}"));
+			if_trace!(debug!("Attempting to correct memfile stream length from {v} to {read}"));
+			
+			truncate_stream(v, read)?
+		    },
+		    Ok(&v) => {
+			if_trace!(trace!("Reported memfile stream length and copy result equal: {v} == {}", read));
+			v
+		    },
+		    Err(e) => {
+			if_trace!(error!("Could not report memfile stream length, ignoring check on {read}: {e}"));
+			if_trace!(warn!("Attempting to correct memfile stream length anyway"));
+			if let Err(e) = truncate_stream(0, read) {
+			    if_trace!(error!("Truncate failed: {e}"));
+			}
+			
+			read
+		    }
+		};
+		(read, Some(sp), Some(sl))
+	    } else {
+		(read, None, None)
 	    };
 
-	    let truncate_stream = |bad: u64, good: u64| {
-		use std::num::NonZeroU64;
-		use std::borrow::Cow;
-		file.set_len(good)
-		    .map(|_| good)
-		    .with_section(|| match NonZeroU64::new(bad) {Some (b) => Cow::Owned(b.get().to_string()), None => Cow::Borrowed("<unknown>") }.header("Original (bad) length"))
-		    .with_section(|| good.header("New (correct) length"))
-		    .wrap_err(eyre!("Failed to truncate stream to correct length")
-			      .with_section(|| format!("{:?}", file).header("Memory buffer file")))
-	    };
-	    
-	    let read = match sl.as_ref() {
-		Ok(&v) if v != read  => {
-		    if_trace!(warn!("Reported read value not equal to memfile stream length: expected from `io::copy()`: {read}, got {v}"));
-		    if_trace!(debug!("Attempting to correct memfile stream length from {v} to {read}"));
-		    
-		    truncate_stream(v, read)?
-		},
-		Ok(&v) => {
-		    if_trace!(trace!("Reported memfile stream length and copy result equal: {v} == {}", read));
-		    v
-		},
-		Err(e) => {
-		    if_trace!(error!("Could not report memfile stream length, ignoring check on {read}: {e}"));
-		    if_trace!(warn!("Attempting to correct memfile stream length anyway"));
-		    if let Err(e) = truncate_stream(0, read) {
-			if_trace!(error!("Truncate failed: {e}"));
-		    }
-		    
-		    read
-		}
-	    };
-	    
 	    file.seek(SeekFrom::Start(0))
 		.with_section(|| read.header("Actual read bytes"))
 		.wrap_err(eyre!("Failed to seek back to start of memory buffer file for output")
-			  .with_section(|| unwrap_int_string(sp).header("Memfile position"))
+			  .with_section(move || if let Some(sp) = sp { Cow::Owned(unwrap_int_string(sp)) }
+					else { Cow::Borrowed("<unknown>")  }.header("Memfile position"))
+			  .with_section(move || if let Some(sp) = sl { Cow::Owned(unwrap_int_string(sp)) }
+					else { Cow::Borrowed("<unknown>")  }.header("Memfile full length"))
 			  /*.with_section(|| file.stream_len().map(|x| x.to_string())
 			  .unwrap_or_else(|e| format!("<unknown: {e}>")).header("Memfile full length"))*/)?;
 	    
-	    read
-	} else {
 	    read
 	};
 	
