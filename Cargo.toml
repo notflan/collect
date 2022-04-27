@@ -1,24 +1,57 @@
 [package]
 name = "collect"
-version = "0.2.0"
-edition = "2021"
+version = "1.0.0"
+description = "collect all of stdin until it is closed, then output it all to stdout"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Avril <flanchan@cumallover.me>"]
+homepage = "https://git.flanchan.moe/flanchan/collect/"
+repository="https://github.com/notflan/collect"
+edition = "2021"
+license = "GPL-3.0-or-later"
 
 [features]
-default = ["jemalloc", "memfile", "logging", "tracing/release_max_level_warn"] #, "memfile" ]
+# Endable default mode (`memfile-preallocate`).
+# (Best output appears to come from `memfile-preallocate`, compared to `memfile` and `buffered`)
+#
+# # Alternatives
+# To use a specific mode: `cargo build --release --no-default-features --features mode-{memfile,buffered}[,logging]`
+#
+# # Logging
+# Tracing can be disabled at compile-time for higher performance by disabling the `logging` feature (see above, but remove `,logging` from the features.)
+default = ["mode-memfile", "logging"]
 
-# TODO: mmap, memfd_create() ver
+## --- Modes --- ##
+
+# Mode: default
+# Use physical-memory backed kernel file-descriptors. (see feature `memfile`.)
+mode-memfile = ["memfile-preallocate"] #, "tracing/release_max_level_warn"]
+
+# Mode: alternative
+# Use non-physical memory allocated buffers.
+mode-buffered = ["jemalloc", "bytes"]
+
+## --- Individual features --- ##
+
+# Use an in-memory file for storage instead of a byte-buffer.
+#
+# This can draastically improve performance as it allows for the use of `splice()` and `send_file()` syscalls instead of many `read()` and `write()` ones.
+#
+# # *NOTE*: Requires the Linux `memfd_create()` syscall to be available in libc.
+# # **WARNING**: Can potentially cause *full system OOM* if the initial size of the input pipe is:
+# * Statically sized (the program can infer the size of standard input.)
+# * The standard input file/buffer pipe size is large enough to pre-allocate enough splicing space to use up the rest of your physical RAM.
+# (This will very likely not happen unless you're specifically trying to make it happen, however.)
 memfile = ["bitflags", "lazy_static", "stackalloc"]
 
-# When unable to determine the size of the input, preallocate the buffer to a multiple of the system page-size before writing to it. This can save extra `ftruncate()` calls, but will also result in the buffer needing to be truncated to the correct size at the end if the sizes as not matched.
+# `memfile`: When unable to determine the size of the input, preallocate the buffer to a multiple of the system page-size before writing to it. This can save extra `ftruncate()` calls, but will also result in the buffer needing to be truncated to the correct size at the end if the sizes as not matched.
+#
+# *NOTE*: Requires `getpagesz()` to be available in libc.
 memfile-preallocate = ["memfile"]
 
-# bytes: use `bytes` crate for collecting instead of `std::vec`
 
 # Use jemalloc instead of system malloc.
 #
-# Decreases memory-handling function calls, resulting in less "used" memory and faster allocation speeds at the cost of mapping a huge amount of virtual memory.
+# Decreases memory-handling function calls, resulting in less "used" memory and faster allocation speeds at the "cost" of mapping a huge amount of virtual memory.
 jemalloc = ["jemallocator"]
 
 # Remove all runtime logging code.
