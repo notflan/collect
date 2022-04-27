@@ -1,4 +1,4 @@
-collect
+/target
 *~
 
 # Profiling
@@ -7,3 +7,4 @@ collect
 perf.*
 vgcore.*
 
+collect-*

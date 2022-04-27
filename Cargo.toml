@@ -1,0 +1,92 @@
+[package]
+name = "collect"
+version = "1.0.0"
+description = "collect all of stdin until it is closed, then output it all to stdout"
+
+authors = ["Avril <flanchan@cumallover.me>"]
+homepage = "https://git.flanchan.moe/flanchan/collect/"
+repository="https://github.com/notflan/collect"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[features]
+# Endable default mode (`memfile-preallocate`).
+# (Best output appears to come from `memfile-preallocate`, compared to `memfile` and `buffered`)
+#
+# # Alternatives
+# To use a specific mode: `cargo build --release --no-default-features --features mode-{memfile,buffered}[,logging]`
+#
+# # Logging
+# Tracing can be disabled at compile-time for higher performance by disabling the `logging` feature (see above, but remove `,logging` from the features.)
+default = ["mode-memfile", "logging"]
+
+## --- Modes --- ##
+
+# Mode: default
+# Use physical-memory backed kernel file-descriptors. (see feature `memfile`.)
+mode-memfile = ["memfile-preallocate"] #, "tracing/release_max_level_warn"]
+
+# Mode: alternative
+# Use non-physical memory allocated buffers.
+mode-buffered = ["jemalloc", "bytes"]
+
+## --- Individual features --- ##
+
+# Use an in-memory file for storage instead of a byte-buffer.
+#
+# This can draastically improve performance as it allows for the use of `splice()` and `send_file()` syscalls instead of many `read()` and `write()` ones.
+#
+# # *NOTE*: Requires the Linux `memfd_create()` syscall to be available in libc.
+# # **WARNING**: Can potentially cause *full system OOM* if the initial size of the input pipe is:
+# * Statically sized (the program can infer the size of standard input.)
+# * The standard input file/buffer pipe size is large enough to pre-allocate enough splicing space to use up the rest of your physical RAM.
+# (This will very likely not happen unless you're specifically trying to make it happen, however.)
+memfile = ["bitflags", "lazy_static", "stackalloc"]
+
+# `memfile`: When unable to determine the size of the input, preallocate the buffer to a multiple of the system page-size before writing to it. This can save extra `ftruncate()` calls, but will also result in the buffer needing to be truncated to the correct size at the end if the sizes as not matched.
+#
+# *NOTE*: Requires `getpagesz()` to be available in libc.
+memfile-preallocate = ["memfile"]
+
+
+# Use jemalloc instead of system malloc.
+#
+# Decreases memory-handling function calls, resulting in less "used" memory and faster allocation speeds at the "cost" of mapping a huge amount of virtual memory.
+jemalloc = ["jemallocator"]
+
+# Remove all runtime logging code.
+#
+# The capturing of spantraces will still happen if `logging` is enabled.
+disable-logging = [] #["tracing/max_level_off"] <-- no longer needed, would enable the `tracing` feature which we don't want.
+
+# Capture spantraces
+#
+# Will cause a slowdown, but provide more information in the event of an error or when debugging.
+logging = ["tracing", "tracing-subscriber", "tracing-error", "color-eyre/capture-spantrace"] #, "recolored" <- XXX doesn't work in tracing output for some reason...] 
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip=true
+
+[profile.symbols]
+inherits="release"
+#incremental=true
+strip=false
+
+[dependencies]
+bytes = { version = "1.1.0", optional = true }
+cfg-if = { version = "1.0.0" }
+jemallocator = { version = "0.3.2", optional = true }
+libc = "0.2.122"
+tracing = { version = "0.1.33", features = ["attributes"], optional = true }
+tracing-error = {version = "0.2.0", optional = true }
+tracing-subscriber = { version = "0.3.11", features = ["tracing", "env-filter"], optional = true }
+color-eyre = { version = "0.6.1", default-features=false }#, features = ["capture-spantrace"] }
+recolored = { version = "1.9.3", optional = true }
+memchr = "2.4.1"
+lazy_format = "1.10.0"
+bitflags = {version = "1.3.2", optional = true }
+stackalloc = {version = "1.1.1", optional = true }
+lazy_static = { version = "1.4.0", optional = true }
