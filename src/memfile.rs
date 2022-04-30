@@ -16,6 +16,9 @@ use std::{
 pub mod fd;
 pub mod error;
 mod map;
+//TODO: #[cfg(feature="hugetlb")] 
+mod hp;
+
 
 /// Flags passed to `memfd_create()` when used in this module
 const MEMFD_CREATE_FLAGS: libc::c_uint = libc::MFD_CLOEXEC;
