@@ -1,5 +1,15 @@
 //! # Huge pages
 //! Calculates available huge page sizes, and creates `memfd_create()` flag masks for a `MFD_HUGETLB` fd.
+//!
+//! ## Method of calculating HUGETLB masks
+//! * Enumerate and find the numbers matching on the subdirectories in dir `/sys/kernel/mm/hugepages/hugepages-(\d+)kB/`
+//! * Multiply that number by `1024`.
+//! * Calculate the base-2 logorithm (`log2()`) of the resulting number.
+//! * Left shift that number by `MAP_HUGE_SHIFT`. This produces a valid `MAP_HUGE_...`-useable flag the same as the builtin `sys/mman.h` flags (`MAP_HUGE_2MB`, `MAP_HUGE_1GB`, etc..)
+//! * The resulting number is a valid flag to pass to `memfd_create()` if it is `|`d with `MFD_HUGETLB`
+//!
+//! All `MAP_HUGE_...` flags must be bitwise OR'd with that flag in `memfd_create()`, however other memory handling syscalls that support hugepages will also accept the constructed `MAP_HUGE_...` flag as valid as per their own specification.
+
 use super::*;
 use std::{
     path::Path,
