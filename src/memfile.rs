@@ -53,9 +53,32 @@ pub fn create_memfile(name: Option<&str>, size: usize) -> eyre::Result<fs::File>
 
 impl Clone for RawFile
 {
-    #[inline] 
+    #[inline]
+    #[cfg_attr(feature="logging", instrument(skip_all))]
     fn clone(&self) -> Self {
 	self.try_clone().expect("failed to duplicate raw fd")
+    }
+
+    #[inline]
+    fn clone_from(&mut self, source: &Self)
+    {
+	if (!cfg!(debug_assertions)) || !std::ptr::eq(self, source) {
+	    #[cfg(feature="logging")]
+	    let span = trace_span!("clone_from()", self = ?self, source= ?source);
+	    #[cfg(feature="logging")]
+	    let _span = span.enter();
+	    
+	    self.try_link_from(source).expect("failed to duplicate raw fd into self");
+	} else {
+	    #[cfg(feature="logging")]
+	    let span = trace_span!("clone_from()", self = ?format!("0x{:x}", self as *mut _ as usize), source = ?format!("0x{:x}", source as *const _ as usize));
+	    #[cfg(feature="logging")]
+	    let _span = span.enter();
+	    
+	    if_trace!(error!("`self` and `source` are the same variable. This should never happen!"));
+	    #[cfg(not(feature="logging"))] 
+	    panic!("Mutable reference and shared reference point to the same location in memory")
+	}
     }
 }
 
@@ -119,8 +142,9 @@ impl RawFile
     /// This is a safe wrapper around `dup2()`, as `clone()` is a safe wrapper around `dup()`.
     ///
     /// # Note
-    /// If `T` is a buffered container (e.g. `std::fs::File`), make sure the buffer is flushed *before* calling this method on it, or the buffered data will be lost.
-    pub fn try_link<'o, T: ?Sized>(&self, other: &'o mut T) -> Result<&'o mut T, error::DuplicateError>
+    /// If `T` is a buffered container (e.g. `std::io::BufWriter<T: AsRawFd>`), make sure the buffer is flushed *before* calling this method on it, or the buffered data will be lost.
+    #[cfg_attr(feature="logging", instrument(err, skip(other), fields(other = ?other.as_raw_fd())))]
+    pub fn try_link_to<'o, T: ?Sized>(&self, other: &'o mut T) -> Result<&'o mut T, error::DuplicateError>
     where T: AsRawFd
     {
 	if unsafe {
@@ -132,7 +156,57 @@ impl RawFile
 	}
     }
 
+    /// Attempt to link `other`'s contained file descriptor to this instance's fd.
+    ///
+    /// This is a safe wrapper around `dup2()`, and an analogue of `try_link_to()`.
+    ///
+    /// # Note
+    /// After this call succeeds, writing to `self` will have the same effect of writing directly to `other`'s contained file descriptor. If `other` is a buffered stream, you must ensure that `other` has been flushed *before* writing anything to `self`.
+    #[cfg_attr(feature="logging", instrument(err, skip(other), fields(other = ?other.as_raw_fd())))]
+    pub fn try_link_from<'i, T: ?Sized>(&mut self, other: &'i T) -> Result<&'i T, error::DuplicateError>
+    where T: AsRawFd
+    {
+	if unsafe {
+	    libc::dup2(other.as_raw_fd(), self.0.get())
+	} < 0 {
+	    Err(error::DuplicateError::new_dup2(other, self))
+	} else {
+	    Ok(other)
+	}
+    }
+
+    /// Link `other`'s contained file descriptor to this instance's fd.
+    ///
+    /// # Panics
+    /// If the call to `dup2()` fails.
+    ///
+    /// # Note
+    /// This is a panicking version of `try_link_from()`. See that function for more information on how to safely use `self` after this call.
+    #[inline]
+	#[cfg_attr(feature="logging", instrument(skip_all))]
+    pub fn link_from<'i, T: ?Sized>(&mut self, other: &'i T) -> &'i T
+    where T: AsRawFd
+    {
+	self.try_link_from(other).expect("failed to duplicate file descriptor from another container")
+    }
+    
+    /// Attempt to link this instance's fd to another container over an fd
+    ///
+    /// # Panics
+    /// If the call to `dup2()` fails.
+    ///
+    /// # Note
+    /// This is a panicking version of `try_link_to()`. See that function for more information on how to safely use `self` after this call.
+    #[inline]
+	#[cfg_attr(feature="logging", instrument(skip_all))]
+    pub fn link_to<'o, T: ?Sized>(&self, other: &'o mut T) -> &'o mut T
+    where T: AsRawFd
+    {
+	self.try_link_to(other).expect("failed to duplicate file descriptor into another container")
+    }
+    
     /// Attempt to duplicate this raw file
+    #[cfg_attr(feature="logging", instrument(err))]
     pub fn try_clone(&self) -> Result<Self, error::DuplicateError>
     {
 	match unsafe { libc::dup(self.0.get()) }
@@ -150,18 +224,30 @@ impl RawFile
     ///
     /// # Returns
     /// If the sync should fail, the original file is returned, along with the error from the sync.
-    #[inline(always)] 
+    #[inline(always)]
+    #[cfg_attr(feature="logging", instrument(level="debug"))]
     pub fn try_from_file_synced(file: fs::File, metadata: bool) -> Result<Self, (fs::File, io::Error)>
     {
+	if_trace!(trace!("syncing file data"));
 	match if metadata {
 	    file.sync_all()
 	} else {
 	    file.sync_data()
 	} {
 	    Ok(()) => unsafe {
+		if_trace!(debug!("sync succeeded, consumeing fd"));
 		Ok(Self::from_raw_fd(file.into_raw_fd()))
 	    },
-	    Err(ioe) => Err((file, ioe))
+	    Err(ioe) => {
+		if_trace!({
+		    #[cfg(feature="logging")]
+		    let span = warn_span!("failed_path", file = ?file, error = ?ioe);
+		    #[cfg(feature="logging")]
+		    let _spen = span.enter();
+		    error!("sync failed: {ioe}")
+		});
+		Err((file, ioe))
+	    },
 	}
     }
     
