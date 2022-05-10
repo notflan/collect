@@ -13,8 +13,10 @@
 use super::*;
 use std::{
     path::Path,
+    ops,
 };
 use libc::{
+    c_uint, c_int,
     MFD_HUGETLB,
     MAP_HUGE_SHIFT,
 };
@@ -24,6 +26,131 @@ use libc::{
 /// This is a directory, and its subdirectories' *names* will contain the size in this format: `hugepages-(\d+)kB` (where the first capture-group is the size in kB.)
 /// The contents of those subdirectories themselves are irrelevent for our purpose.
 pub const HUGEPAGE_SIZES_LOCATION: &'static str = "/sys/kernel/mm/hugepages";
+
+/// A huge-page mask that can be bitwise OR'd with `HUGETLB_MASK`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
+#[repr(transparent)]
+pub struct Mask(c_uint);
+
+#[inline]
+const fn log2_usize(x: usize) -> usize {
+    const BITS: usize = std::mem::size_of::<usize>() * 8usize; //XXX Is this okay to be hardcoded? I can't find CHAR_BIT in core, so...
+
+    BITS - (x.leading_zeros() as usize) - 1
+}
+
+impl Mask {
+    /// The shift mask used to calculate huge-page masks
+    pub const SHIFT: c_int = MAP_HUGE_SHIFT;
+    
+    /// The raw bitmask applied to make the `MAP_HUGE_` mask available via `raw()` valid for `memfd_create()` in `mask()`
+    pub const HUGETLB_MASK: c_uint = MFD_HUGETLB;
+    
+    #[cfg_attr(feature="logging", instrument(level="debug", err))]
+    #[inline]
+    pub fn new_checked(bytes: usize) -> eyre::Result<Self>
+    {
+	Ok(Self(c_uint::try_from(log2_usize(bytes))?
+		.checked_shl(Self::SHIFT as u32).ok_or(eyre!("Left shift would overflow"))?))
+    }
+
+    /// Create a new mask from a number of bytes.
+    ///
+    /// This is unchecked and may overflow if the number of bytes is so large (in which case, there is likely a bug), for a checked version, use `new_checked()`.
+    #[inline]
+    pub const fn new(bytes: usize) -> Self
+    {
+	Self((log2_usize(bytes) as c_uint) << Self::SHIFT)
+    }
+
+    /// Create from a raw `MAP_HUGE_` mask.
+    ///
+    /// # Safety
+    /// The caller **must** guarantee that `mask` is a valid `MAP_HUGE_` mask.
+    #[inline] 
+    pub const unsafe fn from_raw(mask: c_uint) -> Self
+    {
+	Self(mask)
+    }
+
+    /// Get the raw `MAP_HUGE_` mask.
+    #[inline]
+    pub const fn raw(self) -> c_uint
+    {
+	self.0
+    }
+
+    /// Get a HUGETLB mask suitable for `memfd_create()` from this value.
+    #[inline] 
+    pub const fn mask(self) -> c_uint
+    {
+	self.raw() | Self::HUGETLB_MASK
+    }
+    
+    /// Create a function that acts as `memfd_create()` with *only* this mask applied to it.
+    ///
+    /// The `flags` argument is erased. To pass arbitrary flags to `memfd_create()`, use `memfd_create_wrapper_flags()`
+    pub const fn memfd_create_wrapper(self) -> impl Fn (*const libc::c_char) -> c_int
+    {
+	use libc::memfd_create;
+	move |path| {
+	    unsafe {
+		memfd_create(path, self.mask())
+	    }
+	}
+    }
+
+    /// Create a function that acts as `memfd_create()` with this mask applied to it.
+    pub const fn memfd_create_wrapper_flags(self) -> impl Fn (*const libc::c_char, c_uint) -> c_int
+    {
+	use libc::memfd_create;
+	move |path, flag| {
+	    unsafe {
+		memfd_create(path, flag | self.mask())
+	    }
+	}
+    }
+}
+
+impl TryFrom<usize> for Mask
+{
+    type Error = eyre::Report;
+
+    #[cfg_attr(feature="logging", instrument(level="trace", skip_all))]
+    #[inline(always)] 
+    fn try_from(from: usize) -> Result<Self, Self::Error>
+    {
+	Self::new_checked(from)
+    }
+}
+
+
+impl ops::BitOr<c_uint> for Mask
+{
+    type Output= c_uint;
+    #[inline] 
+    fn bitor(self, rhs: c_uint) -> Self::Output {
+	self.mask() | rhs
+    }
+}
+impl ops::BitOr for Mask
+{
+    type Output= Self;
+    #[inline] 
+    fn bitor(self, rhs: Self) -> Self::Output {
+	Self(self.0 | rhs.0)
+    }
+}
+
+impl ops::BitOrAssign for Mask
+{
+    #[inline] 
+    fn bitor_assign(&mut self, rhs: Self) {
+	self.0 |= rhs.0;
+    }   
+}
+
+//TODO: add test for `Mask::new{,_checked}()` above, and `.memfd_create_wrapper{,_flags}()` usage, too with some `MAP_HUGE_` constants as sizes
 
 /// Take a directory path and try to parse the hugepage size from it.
 ///
@@ -113,3 +240,4 @@ fn find_size_bytes(path: impl AsRef<Path>) -> Option<usize>
 
     kb_str.parse::<usize>().ok().map(move |sz| kmap_lookup(sz, k_chr))
 }
+//TODO: add test for `find_size_bytes()` above
