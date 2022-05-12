@@ -192,25 +192,31 @@ fn find_size_bytes(path: impl AsRef<Path>) -> Option<usize>
     }
     
     let path= path.as_ref();
-    if !path.is_dir() {
-	return None;
-    } 
+    /*if !path.is_dir() {
+    // These don't count as directories for some reason
+    return None;
+} */
 
     let dir_name = path.file_name()?;
     let dir_bytes = dir_name.as_bytes();
+    if_trace!(trace!("dir_name: {dir_name:?}"));
     
     // location of the b'-' in the dir name
     let split_loc = memchr::memchr(b'-', dir_bytes)?;
     
+    
     // The rest of the string including the b'-' seperator. (i.e. '-(\d+)kB$')
     let split_bytes = &dir_bytes[split_loc..];
+    if_trace!(debug!("split_bytes (from `-'): {:?}", std::ffi::OsStr::from_bytes(split_bytes)));
 
     // location of the IEC tag (in `KMAP_TAGS`, expected to be b'k') after the number of kilobytes
     let (k_loc, k_chr) = 'lookup: loop  {
 	for &tag in KMAP_TAGS {
+	    if_trace!(trace!("attempting check for `{}' ({tag}) in {split_bytes:?}", tag as char));
 	    if let Some(k_loc) = memchr::memchr(tag, split_bytes) {
 		break 'lookup (k_loc, tag);
 	    } else {
+		if_trace!(warn!("lookup failed"));
 		continue 'lookup;
 	    }
 	}
@@ -223,6 +229,8 @@ fn find_size_bytes(path: impl AsRef<Path>) -> Option<usize>
     // The number of kilobytes in this hugepage as a base-10 string
     let kb_str = {
 	let kb_str = &split_bytes[..k_loc];// &dir_bytes[split_loc..k_loc];
+	
+	if_trace!(trace!("kb_str (raw): {:?}", std::ffi::OsStr::from_bytes(kb_str)));
 	if kb_str.len() <= 1 {
 	    // There is no number between the digits and the `kB` (unlikely)
 	    if_trace!(error!("Invalid format of hugepage kB size in pathname `{:?}': Extracted string was `{}'", dir_name, String::from_utf8_lossy(kb_str)));
@@ -237,7 +245,35 @@ fn find_size_bytes(path: impl AsRef<Path>) -> Option<usize>
 	    }
 	}
     };
+    
+    if_trace!(debug!("kb_str (extracted): {kb_str}"));
 
-    kb_str.parse::<usize>().ok().map(move |sz| kmap_lookup(sz, k_chr))
+    kb_str.parse::<usize>().ok().map(move |sz| {
+	if_trace!(debug!("found raw size {sz}, looking up in table for byte result of suffix `{}'", k_chr as char));
+	kmap_lookup(sz, k_chr)
+    })
 }
 //TODO: add test for `find_size_bytes()` above
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+    #[test]
+    fn find_size_bytes() -> eyre::Result<()>
+    {
+	//crate::init()?; XXX: Make `find_size_bytes` return eyre::Result<usize> instead of Option<usize>
+	let dir = Path::new(super::HUGEPAGE_SIZES_LOCATION).read_dir()?;
+	for result in dir
+	    .map(|x| x.map(|n| n.file_name()))
+	    .map(|name| name.map(|name| super::find_size_bytes(name)))
+	{
+	    println!("size: {}", result
+		     .wrap_err(eyre!("Failed to extract name"))?
+		     .ok_or(eyre!("Failed to find size"))?);
+	}
+	
+	
+	Ok(())
+    }
+}
