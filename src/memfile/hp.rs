@@ -14,6 +14,7 @@ use super::*;
 use std::{
     path::Path,
     ops,
+    fmt,
 };
 use libc::{
     c_uint, c_int,
@@ -31,6 +32,42 @@ pub const HUGEPAGE_SIZES_LOCATION: &'static str = "/sys/kernel/mm/hugepages";
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 #[repr(transparent)]
 pub struct Mask(c_uint);
+
+impl fmt::Display for Mask
+{
+    #[inline] 
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	write!(f, "{}", self.raw())
+    }
+}
+
+impl fmt::LowerHex for Mask
+{
+    #[inline] 
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	write!(f, "0x{:x}", self.raw())
+    }   
+}
+
+impl fmt::UpperHex for Mask
+{
+    #[inline] 
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	write!(f, "0x{:X}", self.raw())
+    }   
+}
+
+impl fmt::Binary for Mask
+{
+    #[inline] 
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	write!(f, "0b{:b}", self.raw())
+    }
+}
 
 #[inline]
 const fn log2_usize(x: usize) -> usize {
@@ -75,16 +112,16 @@ impl Mask {
 
     /// Get the raw `MAP_HUGE_` mask.
     #[inline]
-    pub const fn raw(self) -> c_uint
+    pub const fn raw(self) -> c_int
     {
-	self.0
+	self.0 as c_int
     }
 
     /// Get a HUGETLB mask suitable for `memfd_create()` from this value.
     #[inline] 
     pub const fn mask(self) -> c_uint
     {
-	self.raw() | Self::HUGETLB_MASK
+	(self.raw() as c_uint) | Self::HUGETLB_MASK
     }
     
     /// Create a function that acts as `memfd_create()` with *only* this mask applied to it.
@@ -259,6 +296,21 @@ fn find_size_bytes(path: impl AsRef<Path>) -> Option<usize>
 mod tests
 {
     use super::*;
+
+    fn get_bytes<'a, P: 'a>(from: P) -> eyre::Result<impl Iterator<Item=eyre::Result<usize>> +'a>
+	where P: AsRef<Path>
+    {
+	let dir = from.as_ref().read_dir()?;
+	Ok(dir
+	    .map(|x| x.map(|n| n.file_name()))
+	    .map(|name| name.map(|name| super::find_size_bytes(name)))
+	    .map(|result| match result {
+		Ok(None) => Err(eyre!("Failed to extract bytes")),
+		Ok(Some(x)) => Ok(x),
+		Err(err) => Err(eyre::Report::from(err)),
+	    }))
+    }
+    
     #[test]
     fn find_size_bytes() -> eyre::Result<()>
     {
@@ -275,5 +327,33 @@ mod tests
 	
 	
 	Ok(())
+    }
+
+    #[test]
+    fn find_map_huge_flags() -> eyre::Result<()>
+    {
+	const CONSTANTS: &[c_int] = &[
+	    libc::MAP_HUGE_1GB,
+	    libc::MAP_HUGE_1MB,
+	    libc::MAP_HUGE_2MB,
+	];
+	eprintln!("Test array contains flags: {:#?}", CONSTANTS.iter().map(|x| format!("0x{x:X} (0b{x:b})")).collect::<Vec<String>>());
+	let mut ok = 0usize;
+	for bytes in get_bytes(super::HUGEPAGE_SIZES_LOCATION)? {
+
+	    let bytes = bytes?;
+	    let flag = super::Mask::new(bytes);
+	    if CONSTANTS.contains(&flag.raw()) {
+		println!("Found pre-set MAP_HUGE_ flag: {flag:X} ({flag:b}, {bytes} bytes)");
+		ok +=1;
+	    }
+	}
+	if ok>0 {
+	    println!("Found {ok} / {} of test flags set.", CONSTANTS.len());
+	    Ok(())
+	} else {
+	    println!("Found none of the test flags set...");
+	    Err(eyre!("Failed to find any matching map flags in test array of `MAP_HUGE_` flags: {:?}", CONSTANTS))
+	}
     }
 }
