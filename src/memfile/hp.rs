@@ -300,15 +300,12 @@ mod tests
     fn get_bytes<'a, P: 'a>(from: P) -> eyre::Result<impl Iterator<Item=eyre::Result<usize>> +'a>
 	where P: AsRef<Path>
     {
+	use crate::*;
 	let dir = from.as_ref().read_dir()?;
 	Ok(dir
 	    .map(|x| x.map(|n| n.file_name()))
 	    .map(|name| name.map(|name| super::find_size_bytes(name)))
-	    .map(|result| match result {
-		Ok(None) => Err(eyre!("Failed to extract bytes")),
-		Ok(Some(x)) => Ok(x),
-		Err(err) => Err(eyre::Report::from(err)),
-	    }))
+	    .map(|result| result.flatten()))
     }
     
     #[test]

@@ -65,6 +65,7 @@ macro_rules! function {
     }}
 }
 
+mod ext; use ext::*;
 mod sys;
 use sys::{
     try_get_size,
