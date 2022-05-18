@@ -248,7 +248,24 @@ impl ops::BitOrAssign for Mask
     }   
 }
 
-//TODO: add test for `Mask::new_checked()` above, and `.memfd_create_wrapper{,_flags}()` usage, too with some `MAP_HUGE_` constants as sizes
+impl PartialEq<c_uint> for Mask
+{
+    #[inline] 
+    fn eq(&self, &other: &c_uint) -> bool
+    {
+	self.mask() == other
+    }
+}
+impl PartialEq<c_int> for Mask
+{
+    #[inline] 
+    fn eq(&self, &other: &c_int) -> bool
+    {
+	self.raw() == other
+    }
+}
+
+//TODO: add test `.memfd_create_wrapper{,_flags}()` usage, too with some `MAP_HUGE_` constants as sizes
 
 /// Take a directory path and try to parse the hugepage size from it.
 ///
@@ -395,6 +412,24 @@ mod tests
 	    libc::MAP_HUGE_2MB,
 	];
 
+	#[inline]
+	fn find_constants_from<'a, I, M>(masks: I) -> impl Iterator<Item=c_int> + 'a
+	where I: IntoIterator<Item = M> + 'a,
+	      M: PartialEq<c_int> + 'a
+	{
+	    #[inline] 
+	    fn slow_contains(m: &impl PartialEq<c_int>) -> Option<c_int>
+	    {
+		for c in CONSTANTS {
+		    if m == c {
+			return Some(*c);
+		    }
+		}
+		None
+	    }
+	    masks.into_iter().filter_map(|mask| slow_contains(&mask))
+	}
+
 	#[inline] 
 	fn find_constants_in(path: impl AsRef<Path>, checked: bool) -> eyre::Result<usize>
 	{
@@ -444,6 +479,30 @@ mod tests
 	    }
 	}
 
-	//TODO: test `get_masks()`
+	#[test]
+	fn get_masks_matching_constants() -> eyre::Result<()>
+	{
+	    let masks: usize = find_constants_from(super::get_masks()?
+						   .inspect(|mask| match mask {
+						       Ok(mask) => eprintln!(" -> mask {mask:x} ({mask:b})"),
+						       Err(e) => eprintln!(" ! failed extraction: {e}")
+						   }).filter_map(Result::ok))
+		.count();
+	    
+	    (masks > 0).then(|| drop(println!("Found {masks} masks matching pre-set constants"))).ok_or(eyre!("Found no masks matching constants"))
+	}
+	
+	#[test]
+	fn get_masks() -> eyre::Result<()>
+	{
+	    let masks: usize = super::get_masks()?
+		.inspect(|mask| match mask {
+		    Ok(mask) => eprintln!(" -> mask {mask:x} ({mask:b})"),
+		    Err(e) => eprintln!(" ! failed extraction: {e}")
+		})
+		.count();
+	    
+	    (masks > 0).then(|| drop(println!("Found {masks} masks on system"))).ok_or(eyre!("Found no masks"))
+	}
     }
 }
