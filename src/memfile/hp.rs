@@ -28,6 +28,67 @@ use libc::{
 /// The contents of those subdirectories themselves are irrelevent for our purpose.
 pub const HUGEPAGE_SIZES_LOCATION: &'static str = "/sys/kernel/mm/hugepages";
 
+/// Should creation of `Mask`s from extracted kernel information be subject to integer conversion checks?
+///
+/// This is `true` on debug builds or if the feature `hugepage-checked-masks` is enabled.
+const CHECKED_MASK_CREATION: bool = if cfg!(feature="hugepage-checked-masks") || cfg!(debug_assertions) { true } else { false };
+
+
+/// Find all `Mask`s defined within this specific directory.
+///
+/// This is usually only useful when passed `HUGEPAGE_SIZES_LOCATION` unless doing something funky with it.
+/// For most use-cases, `get_masks()` should be fine.
+#[cfg_attr(feature="logging", instrument(err, skip_all, fields(path = ?path.as_ref())))]
+#[inline] 
+pub fn get_masks_in<P>(path: P) -> eyre::Result<impl Iterator<Item=eyre::Result<Mask>> + 'static>
+where P: AsRef<Path>
+{
+    let path = path.as_ref();
+    let root_path = {
+	let path = path.to_owned();
+	move || path
+    };
+    let root_path_section = {
+	let root_path = root_path.clone();
+	move ||
+	    root_path().to_string_lossy().into_owned().header("Root path was")
+    };
+    
+
+    let dir = path.read_dir()
+	.wrap_err(eyre!("Failed to enumerate directory")
+		  .with_section(root_path_section.clone()))?;
+    Ok(dir
+       .map(|x| x.map(|n| n.file_name()))
+       .map(|name| name.map(|name| (find_size_bytes(&name), name)))
+       .map(move |result| match result {
+	   Ok((Some(ok), path)) => {
+	       if CHECKED_MASK_CREATION {
+		   Mask::new_checked(ok)
+		       .wrap_err(eyre!("Failed to create mask from extracted bytes")
+				 .with_section(|| ok.header("Bytes were"))
+				 .with_section(move || format!("{path:?}").header("Checked path was"))
+				 .with_section(root_path_section.clone()))
+	       } else {
+		   Ok(Mask::new(ok))
+	       }
+	   },
+	   Ok((None, path)) => Err(eyre!("Failed to extract bytes from path"))
+	       .with_section(move || format!("{path:?}").header("Checked path was"))
+	       .with_section(root_path_section.clone()),
+	   Err(e) => Err(e).wrap_err(eyre!("Failed to read path from which to extract bytes")
+				     .with_section(root_path_section.clone()))
+       }))
+}
+
+/// Find all `Mask`s on this system.
+#[cfg_attr(feature="logging", instrument(level="trace"))]
+    #[inline] 
+pub fn get_masks() -> eyre::Result<impl Iterator<Item=eyre::Result<Mask>> + 'static>
+{
+    get_masks_in(HUGEPAGE_SIZES_LOCATION)
+}
+
 /// A huge-page mask that can be bitwise OR'd with `HUGETLB_MASK`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 #[repr(transparent)]
@@ -187,7 +248,7 @@ impl ops::BitOrAssign for Mask
     }   
 }
 
-//TODO: add test for `Mask::new{,_checked}()` above, and `.memfd_create_wrapper{,_flags}()` usage, too with some `MAP_HUGE_` constants as sizes
+//TODO: add test for `Mask::new_checked()` above, and `.memfd_create_wrapper{,_flags}()` usage, too with some `MAP_HUGE_` constants as sizes
 
 /// Take a directory path and try to parse the hugepage size from it.
 ///
@@ -290,22 +351,21 @@ fn find_size_bytes(path: impl AsRef<Path>) -> Option<usize>
 	kmap_lookup(sz, k_chr)
     })
 }
-//TODO: add test for `find_size_bytes()` above
 
 #[cfg(test)]
 mod tests
 {
     use super::*;
 
+    #[inline] 
     fn get_bytes<'a, P: 'a>(from: P) -> eyre::Result<impl Iterator<Item=eyre::Result<usize>> +'a>
-	where P: AsRef<Path>
+    where P: AsRef<Path>
     {
-	use crate::*;
 	let dir = from.as_ref().read_dir()?;
 	Ok(dir
-	    .map(|x| x.map(|n| n.file_name()))
-	    .map(|name| name.map(|name| super::find_size_bytes(name)))
-	    .map(|result| result.flatten()))
+	   .map(|x| x.map(|n| n.file_name()))
+	   .map(|name| name.map(|name| super::find_size_bytes(name)))
+	   .map(|result| result.flatten()))
     }
     
     #[test]
@@ -326,31 +386,64 @@ mod tests
 	Ok(())
     }
 
-    #[test]
-    fn find_map_huge_flags() -> eyre::Result<()>
-    {
+    mod map_huge {
+	use super::*;
+	/// Some `MAP_HUGE_` constants provided by libc.
 	const CONSTANTS: &[c_int] = &[
 	    libc::MAP_HUGE_1GB,
 	    libc::MAP_HUGE_1MB,
 	    libc::MAP_HUGE_2MB,
 	];
-	eprintln!("Test array contains flags: {:#?}", CONSTANTS.iter().map(|x| format!("0x{x:X} (0b{x:b})")).collect::<Vec<String>>());
-	let mut ok = 0usize;
-	for bytes in get_bytes(super::HUGEPAGE_SIZES_LOCATION)? {
 
-	    let bytes = bytes?;
-	    let flag = super::Mask::new(bytes);
-	    if CONSTANTS.contains(&flag.raw()) {
-		println!("Found pre-set MAP_HUGE_ flag: {flag:X} ({flag:b}, {bytes} bytes)");
-		ok +=1;
+	#[inline] 
+	fn find_constants_in(path: impl AsRef<Path>, checked: bool) -> eyre::Result<usize>
+	{
+	    let mut ok = 0usize;
+	    for bytes in get_bytes(path)? {
+
+		let bytes = bytes?;
+		let flag = if checked {
+		    super::Mask::new_checked(bytes)
+			.wrap_err(eyre!("Failed to create mask from bytes").with_section(|| bytes.header("Number of bytes was")))?
+		} else {
+		    super::Mask::new(bytes)
+		};
+		if CONSTANTS.contains(&flag.raw()) {
+		    println!("Found pre-set MAP_HUGE_ flag: {flag:X} ({flag:b}, {bytes} bytes)");
+		    ok +=1;
+		}
+	    }
+	    Ok(ok)
+	}
+
+	#[test]
+	fn find_map_huge_flags_checked() -> eyre::Result<()>
+	{
+	    eprintln!("Test array contains flags: {:#?}", CONSTANTS.iter().map(|x| format!("0x{x:X} (0b{x:b})")).collect::<Vec<String>>());
+	    let ok = find_constants_in(super::HUGEPAGE_SIZES_LOCATION, true).wrap_err("Failed to find constants (checked mask creation)")?;
+	    if ok>0 {
+		println!("Found {ok} / {} of test flags set.", CONSTANTS.len());
+		Ok(())
+	    } else {
+		println!("Found none of the test flags set...");
+		Err(eyre!("Failed to find any matching map flags in test array of `MAP_HUGE_` flags: {:?}", CONSTANTS))
 	    }
 	}
-	if ok>0 {
-	    println!("Found {ok} / {} of test flags set.", CONSTANTS.len());
-	    Ok(())
-	} else {
-	    println!("Found none of the test flags set...");
-	    Err(eyre!("Failed to find any matching map flags in test array of `MAP_HUGE_` flags: {:?}", CONSTANTS))
+	
+	#[test]
+	fn find_map_huge_flags() -> eyre::Result<()>
+	{
+	    eprintln!("Test array contains flags: {:#?}", CONSTANTS.iter().map(|x| format!("0x{x:X} (0b{x:b})")).collect::<Vec<String>>());
+	    let ok = find_constants_in(super::HUGEPAGE_SIZES_LOCATION, false).wrap_err("Failed to find constants (unchecked mask creation)")?;
+	    if ok>0 {
+		println!("Found {ok} / {} of test flags set.", CONSTANTS.len());
+		Ok(())
+	    } else {
+		println!("Found none of the test flags set...");
+		Err(eyre!("Failed to find any matching map flags in test array of `MAP_HUGE_` flags: {:?}", CONSTANTS))
+	    }
 	}
+
+	//TODO: test `get_masks()`
     }
 }

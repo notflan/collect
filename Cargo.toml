@@ -24,7 +24,7 @@ default = ["mode-memfile", "logging"]
 
 # Mode: default
 # Use physical-memory backed kernel file-descriptors. (see feature `memfile`.)
-mode-memfile = ["memfile-preallocate"] #, "tracing/release_max_level_warn"]
+mode-memfile = ["memfile-preallocate", "hugetlb"] #, "tracing/release_max_level_warn"]
 
 # Mode: alternative
 # Use non-physical memory allocated buffers.
@@ -42,6 +42,14 @@ mode-buffered = ["jemalloc", "bytes"]
 # * The standard input file/buffer pipe size is large enough to pre-allocate enough splicing space to use up the rest of your physical RAM.
 # (This will very likely not happen unless you're specifically trying to make it happen, however.)
 memfile = ["bitflags", "lazy_static", "stackalloc"]
+
+# Use `MAP_HUGE` masks when needed or asked for.
+hugetlb = ["memfile"]
+
+# Check the conversion of kernel information into `MAP_HUGE` flags
+#
+# Usually only useful for debugging.
+hugepage-checked-masks = ["hugetlb"]
 
 # `memfile`: When unable to determine the size of the input, preallocate the buffer to a multiple of the system page-size before writing to it. This can save extra `ftruncate()` calls, but will also result in the buffer needing to be truncated to the correct size at the end if the sizes as not matched.
 #

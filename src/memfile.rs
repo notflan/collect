@@ -16,7 +16,7 @@ use std::{
 pub mod fd;
 pub mod error;
 mod map;
-//TODO: #[cfg(feature="hugetlb")] 
+#[cfg(feature="hugetlb")] 
 mod hp;
 
 
