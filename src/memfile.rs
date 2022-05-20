@@ -279,8 +279,24 @@ impl RawFile
 	opt.borrow().open(path).map(Into::into)
     }
 
+    /// Allocates `size` bytes for this file.
+    ///
+    /// # Note
+    /// This does not *extend* the file's capacity, it is instead similar to `fs::File::set_len()`.
+    #[cfg_attr(feature="logging", instrument(err))]
+    pub fn allocate_size(&mut self, size: u64) -> io::Result<()>
+    {
+	use libc::{ fallocate, off_t};
+	if_trace!(trace!("attempting fallocate({}, 0, 0, {size}) (max offset: {})", self.0.get(), off_t::MAX));
+	match unsafe { fallocate(self.0.get(), 0, 0, if cfg!(debug_assertions) {
+	    size.try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Offset larger than max offset size"))?
+	} else { size as off_t }) } { //XXX is this biteise AND check needed? fallocate() should already error if the size is negative with these parameters, no?
+	    -1 => Err(io::Error::last_os_error()),
+	    _ => Ok(())
+	}
+    }
+
     /// Open a new in-memory (W+R) file with an optional name and a fixed size.
-    
     #[cfg_attr(feature="logging", instrument(err))]
     pub fn open_mem(name: Option<&str>, len: usize) -> Result<Self, error::MemfileError>
     {

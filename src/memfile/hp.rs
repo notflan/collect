@@ -187,8 +187,9 @@ impl Mask {
     
     /// Create a function that acts as `memfd_create()` with *only* this mask applied to it.
     ///
-    /// The `flags` argument is erased. To pass arbitrary flags to `memfd_create()`, use `memfd_create_wrapper_flags()`
-    pub const fn memfd_create_wrapper(self) -> impl Fn (*const libc::c_char) -> c_int
+    /// The `flags` argument is erased. To pass arbitrary flags to `memfd_create()`, use `memfd_create_raw_wrapper_flags()`
+    #[inline(always)] 
+    pub const fn memfd_create_raw_wrapper(self) -> impl Fn (*const libc::c_char) -> c_int
     {
 	use libc::memfd_create;
 	move |path| {
@@ -199,12 +200,45 @@ impl Mask {
     }
 
     /// Create a function that acts as `memfd_create()` with this mask applied to it.
-    pub const fn memfd_create_wrapper_flags(self) -> impl Fn (*const libc::c_char, c_uint) -> c_int
+    #[inline(always)] 
+    pub const fn memfd_create_raw_wrapper_flags(self) -> impl Fn (*const libc::c_char, c_uint) -> c_int
     {
 	use libc::memfd_create;
 	move |path, flag| {
 	    unsafe {
 		memfd_create(path, flag | self.mask())
+	    }
+	}
+    }
+
+    /// Create a function that acts as safe `memfd_create()` wrapper with this mask applied to it.
+    ///
+    /// The `flags` argument is erased. To pass arbitrary flags to `memfd_create()`, use `memfd_create_wrapper_flags()`
+    /// # Returns
+    /// A RAII-guarded wrapper over the memory-file, or the `errno` in an `Err(io::Error)` if the operation failed.
+    #[inline] 
+    pub const fn memfd_create_wrapper(self) -> impl Fn(*const libc::c_char) -> io::Result<super::RawFile>
+    {
+	let memfd_create = self.memfd_create_raw_wrapper();
+	move |path| {
+	    match memfd_create(path) {
+		-1 => Err(io::Error::last_os_error()),
+		fd => Ok(super::RawFile::take_ownership_of_unchecked(fd))
+	    }
+	}
+    }
+    
+    /// Create a function that acts as safe `memfd_create()` wrapper with this mask applied to it.
+    /// # Returns
+    /// A RAII-guarded wrapper over the memory-file, or the `errno` in an `Err(io::Error)` if the operation failed.
+    #[inline] 
+    pub const fn memfd_create_wrapper_flags(self) -> impl Fn(*const libc::c_char, c_uint) -> io::Result<super::RawFile>
+    {
+	let memfd_create = self.memfd_create_raw_wrapper_flags();
+	move |path, flags| {
+	    match memfd_create(path, flags) {
+		-1 => Err(io::Error::last_os_error()),
+		fd => Ok(super::RawFile::take_ownership_of_unchecked(fd))
 	    }
 	}
     }
@@ -503,6 +537,47 @@ mod tests
 		.count();
 	    
 	    (masks > 0).then(|| drop(println!("Found {masks} masks on system"))).ok_or(eyre!("Found no masks"))
+	}
+
+	//#[test] TODO: XXX: AAAAA: system does not support huge-page memfd_create() allocations!?!?!?!?
+	// TODO: Or am I missing something here? Does it pre-allocate? What is this?
+	fn memfd_create_wrapper() -> eyre::Result<()>
+	{
+	    //crate::init()?;
+	    
+	    use std::ffi::CString;
+	    let name = CString::new(Vec::from_iter(b"memfd_create_wrapper() test".into_iter().copied())).unwrap();
+	    let mask = super::get_masks()?.next().ok_or(eyre!("No masks found"))?.wrap_err("Failed to extract mask")?;
+	    eprintln!("Using mask: {mask:x} ({mask:b})");
+	    let create = mask.memfd_create_wrapper_flags();
+	    let buf = {
+		let mut buf = vec![0; name.as_bytes_with_nul().len()];
+		println!("Allocated {} bytes for buffer", buf.len());
+		let mut file: fs::File = {
+		    let mut file =  unsafe {super::RawFile::from_raw_fd( libc::memfd_create(name.as_ptr(), super::MEMFD_CREATE_FLAGS | mask.mask()) ) };//.wrap_err(eyre!("Failed to create file"))?;
+		    println!("Created file {file:?}");
+		    file.allocate_size(buf.len() as u64).wrap_err(eyre!("fallocate() failed"))?;
+		    println!("Set file-size to {}", buf.len());
+		    file
+		}.into();
+		
+		use std::io::{Read, Write, Seek};
+
+		
+		println!("Writing {} bytes {:?}...", name.as_bytes_with_nul().len(), name.as_bytes_with_nul());
+		file.write_all(name.as_bytes_with_nul()).wrap_err(eyre!("Writing failed"))?;
+		println!("Seeking back to 0...");
+		file.seek(std::io::SeekFrom::Start(0)).wrap_err(eyre!("Seeking failed"))?;
+		println!("Reading {} bytes...", buf.len());
+		file.read_exact(&mut buf[..]).wrap_err(eyre!("Reading failed"))?;
+		
+		println!("Read {} bytes into: {:?}", buf.len(), buf);
+
+		buf
+	    };
+	    assert_eq!(CString::from_vec_with_nul(buf).expect("Invalid contents read"), name);
+
+	    Ok(())
 	}
     }
 }
