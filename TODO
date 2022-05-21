@@ -1,2 +1,8 @@
-TODO: Is there a way we can set the size of `stdout` before exiting?
-TODO: I dunno what `sealing` is, but maybe that can be used? Or, if not, a specific `fcntl()` call? Finding this out will allow consumers of `collect`'s output to use a single `splice()` instead of many, greatly improving its performance in pipelines as its output can be used like an actual file's...
+From `strace` examinations, far fewer `splice()/send_file()` are used from the consumer of a `collect` in the middle of a pipe.
+A reduction of over 5 times. But still not just a single one.
+
+# TODO: single syscall reads from consumers of `collect` in pipelines
+Is there a way we can set the size of `stdout` before exiting?
+I dunno what `sealing` is, but maybe that can be used? Or, if not, a specific `fcntl()` call? Finding this out will allow consumers of `collect`'s output to use a single `splice()` instead of many, greatly improving its performance in pipelines as its output can be used like an actual file's...
+
+
