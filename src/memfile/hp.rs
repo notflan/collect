@@ -40,7 +40,7 @@ const CHECKED_MASK_CREATION: bool = if cfg!(feature="hugepage-checked-masks") ||
 /// For most use-cases, `get_masks()` should be fine.
 #[cfg_attr(feature="logging", instrument(err, skip_all, fields(path = ?path.as_ref())))]
 #[inline] 
-pub fn get_masks_in<P>(path: P) -> eyre::Result<impl Iterator<Item=eyre::Result<Mask>> + 'static>
+pub fn get_masks_in<P>(path: P) -> eyre::Result<impl Iterator<Item=eyre::Result<SizedMask>> + 'static>
 where P: AsRef<Path>
 {
     let path = path.as_ref();
@@ -69,8 +69,11 @@ where P: AsRef<Path>
 				 .with_section(|| ok.header("Bytes were"))
 				 .with_section(move || format!("{path:?}").header("Checked path was"))
 				 .with_section(root_path_section.clone()))
+		       .and_then(|mask| Ok(SizedMask{mask, size: ok.try_into().wrap_err("Size was larger than `u64`")?}))
+		   //	       .map(|mask| -> eyre::Result<_> { Ok(SizedMask{mask, size: ok.try_into()?}) })
+		       
 	       } else {
-		   Ok(Mask::new(ok))
+		   Ok(SizedMask{ mask: Mask::new(ok), size: ok as u64 })
 	       }
 	   },
 	   Ok((None, path)) => Err(eyre!("Failed to extract bytes from path"))
@@ -84,51 +87,156 @@ where P: AsRef<Path>
 /// Find all `Mask`s on this system.
 #[cfg_attr(feature="logging", instrument(level="trace"))]
     #[inline] 
-pub fn get_masks() -> eyre::Result<impl Iterator<Item=eyre::Result<Mask>> + 'static>
+pub fn get_masks() -> eyre::Result<impl Iterator<Item=eyre::Result<SizedMask>> + 'static>
 {
     get_masks_in(HUGEPAGE_SIZES_LOCATION)
 }
+
+
+/// A huge-page mask that can be bitwise OR'd with `HUGETLB_MASK`, but retains the size of that huge-page.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
+pub struct SizedMask
+{
+    mask: Mask,
+    size: u64, 
+}
+
+impl SizedMask
+{
+    #[inline] 
+    pub const fn size(&self) -> u64
+    {
+	self.size
+    }
+    #[inline] 
+    pub const fn as_mask(&self) -> &Mask
+    {
+	&self.mask
+    }
+}
+
+impl std::borrow::Borrow<Mask> for SizedMask
+{
+    #[inline] 
+    fn borrow(&self) -> &Mask {
+	&self.mask
+    }
+}
+
+impl std::ops::Deref for SizedMask
+{
+    type Target = Mask;
+    #[inline] 
+    fn deref(&self) -> &Self::Target {
+	&self.mask
+    }
+}
+
+impl From<SizedMask> for Mask
+{
+    #[inline] 
+    fn from(from: SizedMask) -> Self
+    {
+	from.mask
+    }
+}
+
 
 /// A huge-page mask that can be bitwise OR'd with `HUGETLB_MASK`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 #[repr(transparent)]
 pub struct Mask(c_uint);
 
-impl fmt::Display for Mask
-{
-    #[inline] 
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
-	write!(f, "{}", self.raw())
+/// `Mask` and `SizedMask` trait impls
+const _:() = {
+    macro_rules! mask_impls {
+	($name:ident) => {
+            impl fmt::Display for $name
+	    {
+		#[inline] 
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+		{
+		    write!(f, "{}", self.raw())
+		}
+	    }
+
+	    impl fmt::LowerHex for $name
+	    {
+		#[inline] 
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+		{
+		    write!(f, "0x{:x}", self.raw())
+		}   
+	    }
+
+	    impl fmt::UpperHex for $name
+	    {
+		#[inline] 
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+		{
+		    write!(f, "0x{:X}", self.raw())
+		}   
+	    }
+
+	    impl fmt::Binary for $name
+	    {
+		#[inline] 
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+		{
+		    write!(f, "0b{:b}", self.raw())
+		}
+	    }
+
+	    // Comparisons
+	    
+	    impl PartialEq<c_uint> for $name
+	    {
+		#[inline] 
+		fn eq(&self, &other: &c_uint) -> bool
+		{
+		    self.mask() == other
+		}
+	    }
+	    impl PartialEq<c_int> for $name
+	    {
+		#[inline] 
+		fn eq(&self, &other: &c_int) -> bool
+		{
+		    self.raw() == other
+		}
+	    }
+
+	};
     }
-}
 
-impl fmt::LowerHex for Mask
-{
-    #[inline] 
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
-	write!(f, "0x{:x}", self.raw())
-    }   
-}
+    mask_impls!(Mask);
+    mask_impls!(SizedMask);
 
-impl fmt::UpperHex for Mask
-{
-    #[inline] 
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    impl ops::BitOr<c_uint> for Mask
     {
-	write!(f, "0x{:X}", self.raw())
-    }   
-}
-
-impl fmt::Binary for Mask
-{
-    #[inline] 
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
-	write!(f, "0b{:b}", self.raw())
+	type Output= c_uint;
+	#[inline] 
+	fn bitor(self, rhs: c_uint) -> Self::Output {
+	    self.mask() | rhs
+	}
     }
-}
+    impl ops::BitOr for Mask
+    {
+	type Output= Self;
+	#[inline] 
+	fn bitor(self, rhs: Self) -> Self::Output {
+	    Self(self.0 | rhs.0)
+	}
+    }
+
+    impl ops::BitOrAssign for Mask
+    {
+	#[inline] 
+	fn bitor_assign(&mut self, rhs: Self) {
+	    self.0 |= rhs.0;
+	}   
+    }
+};
 
 #[inline]
 const fn log2_usize(x: usize) -> usize {
@@ -253,49 +361,6 @@ impl TryFrom<usize> for Mask
     fn try_from(from: usize) -> Result<Self, Self::Error>
     {
 	Self::new_checked(from)
-    }
-}
-
-
-impl ops::BitOr<c_uint> for Mask
-{
-    type Output= c_uint;
-    #[inline] 
-    fn bitor(self, rhs: c_uint) -> Self::Output {
-	self.mask() | rhs
-    }
-}
-impl ops::BitOr for Mask
-{
-    type Output= Self;
-    #[inline] 
-    fn bitor(self, rhs: Self) -> Self::Output {
-	Self(self.0 | rhs.0)
-    }
-}
-
-impl ops::BitOrAssign for Mask
-{
-    #[inline] 
-    fn bitor_assign(&mut self, rhs: Self) {
-	self.0 |= rhs.0;
-    }   
-}
-
-impl PartialEq<c_uint> for Mask
-{
-    #[inline] 
-    fn eq(&self, &other: &c_uint) -> bool
-    {
-	self.mask() == other
-    }
-}
-impl PartialEq<c_int> for Mask
-{
-    #[inline] 
-    fn eq(&self, &other: &c_int) -> bool
-    {
-	self.raw() == other
     }
 }
 
@@ -539,45 +604,76 @@ mod tests
 	    (masks > 0).then(|| drop(println!("Found {masks} masks on system"))).ok_or(eyre!("Found no masks"))
 	}
 
-	//#[test] TODO: XXX: AAAAA: system does not support huge-page memfd_create() allocations!?!?!?!?
-	// TODO: Or am I missing something here? Does it pre-allocate? What is this?
-	fn memfd_create_wrapper() -> eyre::Result<()>
+	#[test]
+	fn hugetlb_truncate_succeeds() -> eyre::Result<()>
 	{
-	    //crate::init()?;
+	    /// XXX: Temporary alias until we have a owning `mmap()`'d fd data-structure that impl's `From<impl IntoRawFd>`
+	    type MappedFile = fs::File;
 	    
 	    use std::ffi::CString;
 	    let name = CString::new(Vec::from_iter(b"memfd_create_wrapper() test".into_iter().copied())).unwrap();
 	    let mask = super::get_masks()?.next().ok_or(eyre!("No masks found"))?.wrap_err("Failed to extract mask")?;
 	    eprintln!("Using mask: {mask:x} ({mask:b})");
 	    let create = mask.memfd_create_wrapper_flags();
-	    let buf = {
-		let mut buf = vec![0; name.as_bytes_with_nul().len()];
-		println!("Allocated {} bytes for buffer", buf.len());
-		let mut file: fs::File = {
-		    let mut file =  unsafe {super::RawFile::from_raw_fd( libc::memfd_create(name.as_ptr(), super::MEMFD_CREATE_FLAGS | mask.mask()) ) };//.wrap_err(eyre!("Failed to create file"))?;
-		    println!("Created file {file:?}");
-		    file.allocate_size(buf.len() as u64).wrap_err(eyre!("fallocate() failed"))?;
-		    println!("Set file-size to {}", buf.len());
-		    file
-		}.into();
-		
-		use std::io::{Read, Write, Seek};
+	    let file: MappedFile = {
+		let mut file = create(name.as_ptr(), super::MEMFD_CREATE_FLAGS).wrap_err(eyre!("Failed to create file"))?;
+		println!("Created file {file:?}, attempting ftruncate({})", mask.size());
+		// XXX: Note: `fallocate()` fails on hugetlb files, but `ftruncate()` does not.
+		file.truncate_size(mask.size()).wrap_err(eyre!("ftruncate() failed"))?;
+		println!("Set file-size to {}", mask.size());
 
-		
-		println!("Writing {} bytes {:?}...", name.as_bytes_with_nul().len(), name.as_bytes_with_nul());
-		file.write_all(name.as_bytes_with_nul()).wrap_err(eyre!("Writing failed"))?;
-		println!("Seeking back to 0...");
-		file.seek(std::io::SeekFrom::Start(0)).wrap_err(eyre!("Seeking failed"))?;
-		println!("Reading {} bytes...", buf.len());
-		file.read_exact(&mut buf[..]).wrap_err(eyre!("Reading failed"))?;
-		
-		println!("Read {} bytes into: {:?}", buf.len(), buf);
-
-		buf
-	    };
-	    assert_eq!(CString::from_vec_with_nul(buf).expect("Invalid contents read"), name);
-
+		file
+	    }.into();
+	    
+	    drop(file); //TODO: `mmap()` file to `mask.size()`.
+	    
 	    Ok(())
+	}
+	
+	#[test]
+	#[should_panic]
+	// TODO: `write()` syscall is not allowed here. Try to come up with an example that uses `splice()` and `send_file()`.
+	fn hugetlb_write_fails()
+	{
+	    fn _hugetlb_write_fails() -> eyre::Result<()> { 
+		//crate::init()?;
+		
+		use std::ffi::CString;
+		let name = CString::new(Vec::from_iter(b"memfd_create_wrapper() test".into_iter().copied())).unwrap();
+		let mask = super::get_masks()?.next().ok_or(eyre!("No masks found"))?.wrap_err("Failed to extract mask")?;
+		eprintln!("Using mask: {mask:x} ({mask:b})");
+		let create = mask.memfd_create_wrapper_flags();
+		let buf = {
+		    let mut buf = vec![0; name.as_bytes_with_nul().len()];
+		    println!("Allocated {} bytes for buffer", buf.len());
+		    let mut file: fs::File = {
+			let mut file =  create(name.as_ptr(), super::MEMFD_CREATE_FLAGS)/*unsafe {super::RawFile::from_raw_fd( libc::memfd_create(name.as_ptr(), super::MEMFD_CREATE_FLAGS | mask.mask()) ) };*/.wrap_err(eyre!("Failed to create file"))?;
+			println!("Created file {file:?}, truncating to length of mask: {}", mask.size());
+			// XXX: Note: `fallocate()` fails on hugetlb files, but `ftruncate()` does not.
+			file.truncate_size(mask.size()).wrap_err(eyre!("ftruncate() failed"))?;
+			println!("Set file-size to {}", buf.len());
+			file
+		    }.into();
+		    
+		    use std::io::{Read, Write, Seek};
+
+		    
+		    println!("Writing {} bytes {:?}...", name.as_bytes_with_nul().len(), name.as_bytes_with_nul());
+		    file.write_all(name.as_bytes_with_nul()).wrap_err(eyre!("Writing failed"))?;
+		    println!("Seeking back to 0...");
+		    file.seek(std::io::SeekFrom::Start(0)).wrap_err(eyre!("Seeking failed"))?;
+		    println!("Reading {} bytes...", buf.len());
+		    file.read_exact(&mut buf[..]).wrap_err(eyre!("Reading failed"))?;
+		    
+		    println!("Read {} bytes into: {:?}", buf.len(), buf);
+
+		    buf
+		};
+		assert_eq!(CString::from_vec_with_nul(buf).expect("Invalid contents read"), name);
+
+		Ok(())
+	    }
+	    _hugetlb_write_fails().unwrap();
 	}
     }
 }
