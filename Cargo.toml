@@ -44,11 +44,13 @@ mode-buffered = ["jemalloc", "bytes"]
 memfile = ["bitflags", "lazy_static", "stackalloc"]
 
 # Use `MAP_HUGE` masks when needed or asked for.
+# XXX: This cannot work for our use case as we do not map the fd, we splice() to it... It's entirely useless...
 hugetlb = ["memfile"]
 
 # Check the conversion of kernel information into `MAP_HUGE` flags
 #
 # Usually only useful for debugging.
+# XXX: See above
 hugepage-checked-masks = ["hugetlb"]
 
 # `memfile`: When unable to determine the size of the input, preallocate the buffer to a multiple of the system page-size before writing to it. This can save extra `ftruncate()` calls, but will also result in the buffer needing to be truncated to the correct size at the end if the sizes as not matched.
