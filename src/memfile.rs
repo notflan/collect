@@ -284,6 +284,7 @@ impl RawFile
     /// # Note
     /// This does not *extend* the file's capacity, it is instead similar to `fs::File::set_len()`.
     #[cfg_attr(feature="logging", instrument(err))]
+    #[inline] 
     pub fn allocate_size(&mut self, size: u64) -> io::Result<()>
     {
 	use libc::{ fallocate, off_t};
@@ -291,6 +292,25 @@ impl RawFile
 	match unsafe { fallocate(self.0.get(), 0, 0, if cfg!(debug_assertions) {
 	    size.try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Offset larger than max offset size"))?
 	} else { size as off_t }) } { //XXX is this biteise AND check needed? fallocate() should already error if the size is negative with these parameters, no?
+	    -1 => Err(io::Error::last_os_error()),
+	    _ => Ok(())
+	}
+    }
+
+    /// Sets the size of this file.
+    ///
+    /// The only real difference is that this will work on a `hugetlbfs` file, whereas `allocate_size()` will not.
+    /// # Note
+    /// This is essentially `fs::File::set_len()`.
+    #[cfg_attr(feature="logging", instrument(err))]
+    #[inline] 
+    pub fn truncate_size(&mut self, size: u64) -> io::Result<()>
+    {
+	use libc::{ ftruncate, off_t};
+	if_trace!(trace!("attempting ftruncate({}, {size}) (max offset: {})", self.0.get(), off_t::MAX));
+	match unsafe { ftruncate(self.0.get(), if cfg!(debug_assertions) {
+	    size.try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Offset larger than max offset size"))?
+	} else { size as off_t }) } {
 	    -1 => Err(io::Error::last_os_error()),
 	    _ => Ok(())
 	}
