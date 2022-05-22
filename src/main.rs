@@ -201,12 +201,135 @@ mod work {
 		.unwrap_or_else(|e| format!("<unknown: {e}>"))
 	}
 
+	
+	#[cfg_attr(feature="logging", instrument(skip_all, err, fields(i = ?i.as_raw_fd())))]
+	    #[inline]
+	fn truncate_file<S>(i: impl AsRawFd, to: S) -> eyre::Result<()>
+	where S: TryInto<u64>,
+	<S as TryInto<u64>>::Error: EyreError
+	{
+	    truncate_file_raw(i, to.try_into().wrap_err(eyre!("Size too large"))?)?;
+	    Ok(())
+	}
+	
+	fn truncate_file_raw(i: impl AsRawFd, to: impl Into<u64>) -> io::Result<()>
+	{
+	    use libc::ftruncate;
+	    let fd = i.as_raw_fd();
+	    let to = {
+		let to = to.into();
+		#[cfg(feature="logging")]
+		let span_size_chk = debug_span!("chk_size", size = ?to);
+		#[cfg(feature="logging")]
+		let _span = span_size_chk.enter();
+		
+		if_trace!{
+		    if to > i64::MAX as u64 {
+			error!("Size too large (over max by {}) (max {})", to - (i64::MAX as u64), i64::MAX);
+		    } else {
+			trace!("Setting {fd} size to {to}");
+		    }
+		}
+		
+		if cfg!(debug_assertions) {
+		    i64::try_from(to).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Size too large for ftruncate() offset"))?
+		} else {
+		    to as i64
+		}
+	    };
+	    
+	    match unsafe { ftruncate(fd, to) } {
+		-1 => Err(io::Error::last_os_error()),
+		_ => Ok(())
+	    }
+	}
+	
+	//TODO: How to `ftruncate()` stdout only once... If try_get_size succeeds, we want to do it then. If it doesn't, we want to do it when `stdin` as been consumed an we know the size of the memory-file... `RunOnce` won't work unless we can give it an argument....
+	#[allow(unused_mut)]
+	let mut set_stdout_len = {
+	    cfg_if! {
+		if #[cfg(feature="memfile-size-output")] {
+		    if_trace!(warn!("Feature `memfile-size-output` is not yet stable and will cause crash."));
+		    
+		    const STDOUT: memfile::fd::RawFileDescriptor = unsafe { memfile::fd::RawFileDescriptor::new_unchecked(libc::STDOUT_FILENO) }; //TODO: Get this from `std::io::Stdout.as_raw_fd()` instead.
+		    
+		    use std::sync::atomic::{self, AtomicUsize};
+		    #[cfg(feature="logging")]
+		    let span_ro = debug_span!("run_once", stdout = ?STDOUT);
+
+		    static LEN_HOLDER: AtomicUsize = AtomicUsize::new(0);
+		    
+		    let mut set_len = RunOnce::new(move || {
+			#[cfg(feature="logging")]
+			let _span = span_ro.enter();
+
+			let len =  LEN_HOLDER.load(atomic::Ordering::Acquire);
+
+			if_trace!(debug!("Attempting single `ftruncate()` on `STDOUT_FILENO` -> {len}"));
+			truncate_file(STDOUT, len)
+			    .wrap_err(eyre!("Failed to set length of stdout ({STDOUT}) to {len}"))
+			    
+		    });
+		    
+		    move |len: usize| {
+			#[cfg(feature="logging")]
+			let span_ssl = info_span!("set_stdout_len", len = ?len);
+			
+			#[cfg(feature="logging")]
+			let _span = span_ssl.enter();
+
+			if_trace!(trace!("Setting static-stored len for RunOnce"));
+			
+			LEN_HOLDER.store(len, atomic::Ordering::Release);
+			
+			if_trace!(trace!("Calling RunOnce for `set_stdout_len`"));
+			match set_len.try_run() {
+			    Some(result) => result
+				.with_section(|| len.header("Attempted length set was"))
+				.with_warning(|| libc::off_t::MAX.header("Max length is"))
+				.with_note(|| STDOUT.header("STDOUT_FILENO is")),
+			    None => {
+				if_trace!(warn!("Already called `set_stdout_len()`"));
+				Ok(())
+			    },
+			}
+		    }
+		} else {
+		    |len: usize| -> Result<(), std::convert::Infallible> {
+			#[cfg(feature="logging")]
+			let span_ssl = info_span!("set_stdout_len", len = ?len);
+			#[cfg(feature="logging")]
+			let _span = span_ssl.enter();
+			
+			if_trace!(info!("Feature `memfile-size-output` is disabled; ignoring."));
+			let _ = len;
+			Ok(())
+		    }
+		}
+	    }
+	};
+
 	let (mut file, read) = {
 	    let stdin = io::stdin();
 
 	    let buffsz = try_get_size(&stdin);
 	    if_trace!(debug!("Attempted determining input size: {:?}", buffsz));
-	    let buffsz = buffsz.or_else(DEFAULT_BUFFER_SIZE);
+	    let buffsz = if cfg!(feature="memfile-size-output") {
+		//TODO: XXX: Even if this actually works, is it safe to do this? Won't the consumer try to read `value` bytes before we've written them? Perhaps remove pre-setting entirely...
+		match buffsz {
+		    y @ Some(ref value) => {
+			let value = value.get();
+			
+			set_stdout_len(value).wrap_err("Failed to set stdout len to that of stdin")
+			    .with_section(|| value.header("Stdin len was calculated as"))
+			    .with_warning(|| "This is a pre-setting")?;
+			
+			y
+		    },
+		    n => n,
+		}
+	    } else { buffsz }.or_else(DEFAULT_BUFFER_SIZE);
+	    
 	    if_trace!(if let Some(buf) = buffsz.as_ref() {
 		trace!("Failed to determine input size: preallocating to {}", buf);
 	    } else {
@@ -304,6 +427,11 @@ mod work {
 		       .with_note(|| usize::MAX.header("Maximum value of `usize`")))?)
 	};
 	if_trace!(info!("collected {} from stdin. starting write.", read));
+
+	// TODO: XXX: Currently causes crash. But if we can get this to work, leaving this in is definitely safe (as opposed to the pre-setting (see above.))
+	set_stdout_len(read)
+	    .wrap_err(eyre!("Failed to `ftruncate()` stdout after collection of {read} bytes"))
+	    .with_note(|| "Was not pre-set")?;	
 
 	let written =
 	    io::copy(&mut file, &mut io::stdout().lock())

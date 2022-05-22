@@ -48,6 +48,14 @@ memfile = ["bitflags", "lazy_static"]
 # *NOTE*: Requires `getpagesz()` to be available in libc.
 memfile-preallocate = ["memfile"]
 
+# Set the size of `stdout` when it is known, so consumers can know exactly the size of the input.
+# XXX: Currently doesn't work. TODO: Find out how to make `stdout` `ftruncate()`-able; or some other way to set its size.
+memfile-size-output = ["memfile"]
+
+# Pre-set the `memfile-size-output`.
+# TODO: Maybe make this a seperate feature? See comment about pre-setting in `work::memfd()`...
+# memfile-size-output-preset = ["memfile-size-output"]
+
 # Use jemalloc instead of system malloc.
 #
 # Decreases memory-handling function calls, resulting in less "used" memory and faster allocation speeds at the "cost" of mapping a huge amount of virtual memory.

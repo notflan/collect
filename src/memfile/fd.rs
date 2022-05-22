@@ -109,9 +109,18 @@ impl fmt::Display for BadFDError
 
 pub type FileNo = RawFd;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct RawFileDescriptor(NonNegativeI32);
+
+impl fmt::Debug for RawFileDescriptor
+{
+    #[inline] 
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	write!(f, "RawFileDescriptor({})", self.0.get())
+    }
+}
 
 impl RawFileDescriptor
 {
