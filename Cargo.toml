@@ -1,6 +1,6 @@
 [package]
 name = "collect"
-version = "1.0.2"
+version = "1.0.3"
 description = "collect all of stdin until it is closed, then output it all to stdout"
 keywords = ["shell", "pipe", "utility", "unix", "linux"]
 authors = ["Avril <flanchan@cumallover.me>"]
