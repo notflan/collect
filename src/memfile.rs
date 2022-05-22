@@ -317,11 +317,15 @@ impl RawFile
     }
 
     /// Open a new in-memory (W+R) file with an optional name and a fixed size.
-    #[cfg_attr(feature="logging", instrument(err))]
+    #[cfg_attr(feature="logging", instrument(level="debug", skip_all, err))]
     pub fn open_mem(name: Option<&str>, len: usize) -> Result<Self, error::MemfileError>
     {
+	use std::{
+	    ffi::CString,
+	    borrow::Cow,
+	};
 	lazy_static! {
-	    static ref DEFAULT_NAME: String = format!(concat!("<memfile@", file!(), "->", "{}", ":", line!(), "-", column!(), ">"), function!()); //TODO: If it turns out memfd_create() requires an `&'static str`; remove the use of stackalloc, and have this variable be a nul-terminated CString instead.
+	    static ref DEFAULT_NAME: CString = CString::new(format!(concat!("<memfile@", file!(), "->", "{}", ":", line!(), "-", column!(), ">"), function!())).unwrap();
 	}
 
 	use libc::{
@@ -330,42 +334,39 @@ impl RawFile
 	};
 	use error::MemfileCreationStep::*;
 
-	let rname = name.unwrap_or(&DEFAULT_NAME);
-	
-	stackalloc::alloca_zeroed(rname.len()+1,  move |bname| { //XXX: Isn't the whole point of making `name` `&'static` that I don't know if `memfd_create()` requires static-lifetime name strings? TODO: Check this
-	    #[cfg(feature="logging")] 
-	    let _span = info_span!("stack_name_cpy", size = bname.len());
-	    #[cfg(feature="logging")]
-	    let _span_lock = _span.enter();
+	let bname: Cow<CString> = match name {
+	    Some(s) => Cow::Owned(CString::new(Vec::from(s)).expect("Invalid name")),
+	    None => Cow::Borrowed(&DEFAULT_NAME),
+	};
 
-	    macro_rules! attempt_call
-	    {
-		($errcon:literal, $expr:expr, $step:expr) => {
-		    //if_trace!(debug!("attempting systemcall"));
-		    match unsafe {
-			$expr
-		    } {
-			$errcon => {
-			    if_trace!(warn!("systemcall failed: {}", error::raw_errno()));
-			    Err($step)
-			},
-			x => Ok(x)
-		    }
+	let bname = bname.as_bytes_with_nul();
+	if_trace!(trace!("created nul-terminated buffer for name `{:?}': ({})", std::str::from_utf8(bname), bname.len()));
+	
+	macro_rules! attempt_call
+	{
+	    ($errcon:literal, $expr:expr, $step:expr) => {
+		//if_trace!(debug!("attempting systemcall"));
+		match unsafe {
+		    $expr
+		} {
+		    $errcon => {
+			if_trace!(warn!("systemcall failed: {}", error::raw_errno()));
+			Err($step)
+		    },
+		    x => Ok(x)
 		}
 	    }
+	}
+	
+	let fd = attempt_call!(-1, memfd_create(bname.as_ptr() as *const _, MEMFD_CREATE_FLAGS), Create(name.map(str::to_owned), MEMFD_CREATE_FLAGS))
+	    .map(Self::take_ownership_of_unchecked)?; // Ensures `fd` is dropped if any subsequent calls fail
 
-	    if_trace!(trace!("copying {rname:p} `{rname}' (sz: {}) -> nul-terminated {:p}", rname.len(), bname));
-	    let bname = {
-		unsafe {
-		    std::ptr::copy_nonoverlapping(rname.as_ptr(), bname.as_mut_ptr(), rname.len());
-		}
-		debug_assert_eq!(bname[rname.len()], 0, "Copied name string not null-terminated?");
-		bname.as_ptr()
-	    };
-
-	    let fd = attempt_call!(-1, memfd_create(bname as *const _, MEMFD_CREATE_FLAGS), Create(name.map(str::to_owned), MEMFD_CREATE_FLAGS))
-		.map(Self::take_ownership_of_unchecked)?; // Ensures `fd` is dropped if any subsequent calls fail
-
+	#[cfg(feature="logging")] 
+	let using_memfile = debug_span!("setup_memfd", fd = ?fd.0.get());
+	{
+	    #[cfg(feature="logging")]
+	    let _span = using_memfile.enter();
+	    
 	    if len > 0 {
 		attempt_call!(-1
 			      , fallocate(fd.0.get(), 0, 0, len.try_into()
@@ -379,14 +380,14 @@ impl RawFile
 					     , io::Error::last_os_error())
 			       .expect("Failed to check seek position in fd")
 			       , 0, "memfd seek position is non-zero after fallocate()");
-		    if_trace!(if seeked != 0 { warn!("Trace offset is non-zero: {seeked}") } else { trace!("Trace offset verified ok") });
+		    if_trace!(if seeked != 0 { warn!("Seek offset is non-zero: {seeked}") } else { trace!("Seek offset verified ok") });
 		}
 	    } else {
 		if_trace!(trace!("No length provided, skipping fallocate() call"));
 	    }
-
-	    Ok(fd)
-	})
+	}
+	Ok(fd)
+	    
     }
 }
 
@@ -515,9 +516,11 @@ mod tests
 	    file.seek(SeekFrom::Start(0))?;
 	    file
 	};
-	let v: Vec<u8> = stackalloc::alloca_zeroed(STRING.len(), |buf| {
-	    file.read_exact(buf).map(|_| buf.into())
-	})?;
+	let v = {
+	    let mut buf = vec![0; STRING.len()];
+	    file.read_exact(&mut buf[..])?;
+	    buf
+	};
 
 	assert_eq!(v.len(), STRING.len(), "Invalid read size.");
 	assert_eq!(&v[..], &STRING[..], "Invalid read data.");

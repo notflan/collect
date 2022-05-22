@@ -5,8 +5,6 @@
 
 #[cfg(feature="memfile")] 
 #[macro_use] extern crate lazy_static;
-#[cfg(feature="memfile")]
-extern crate stackalloc;
 
 /// Run this statement only if `tracing` is enabled
 macro_rules! if_trace {
