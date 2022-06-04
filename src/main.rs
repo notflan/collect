@@ -449,12 +449,41 @@ mod work {
     }
 }
 
+
+#[cfg_attr(feature="logging", instrument(err))]
+#[inline(always)]
+unsafe fn close_raw_fileno(fd: RawFd) -> io::Result<()>
+{
+    match libc::close(fd) {
+	0 => Ok(()),
+	_ => Err(io::Error::last_os_error()),
+    }
+}
+
+#[inline]
+#[cfg_attr(feature="logging", instrument(skip_all, fields(T = ?std::any::type_name::<T>())))]
+fn close_fileno<T: IntoRawFd>(fd: T) -> eyre::Result<()>
+{
+    let fd = fd.into_raw_fd();
+    if fd < 0 {
+	return Err(eyre!("Invalid fd").with_note(|| format!("fds begin at 0 and end at {}", RawFd::MAX)));
+    } else {
+	if_trace!(debug!("closing consumed fd {fd}"));
+	unsafe {
+	    close_raw_fileno(fd)
+	}.wrap_err("Failed to close fd")
+	    .with_section(move || fd.header("Fileno was"))
+	    .with_section(|| std::any::type_name::<T>().header(""))
+    }
+}
+
 #[cfg_attr(feature="logging", instrument(err))]
 fn main() -> eyre::Result<()> {
     init()?;
     feature_check()?;
     if_trace!(debug!("initialised"));
 
+    //TODO: maybe look into fd SEALing? Maybe we can prevent a consumer process from reading from stdout until we've finished the transfer. The name SEAL sounds like it might have something to do with that?
     cfg_if!{ 
 	if #[cfg(feature="memfile")] {
 	    work::memfd()
@@ -464,6 +493,17 @@ fn main() -> eyre::Result<()> {
 		.wrap_err("Operation failed").with_note(|| "Strategy was `buffered`")?;
 	}
     }
+    // Transfer complete
+
+    // Now that transfer is complete from buffer to `stdout`, close `stdout` pipe before exiting process.
+    if_trace!(info!("Transfer complete, closing `stdout` pipe"));
+    {
+	let stdout_fd = libc::STDOUT_FILENO; // (io::Stdout does not impl `IntoRawFd`, just use the raw fd directly; using the constant from libc may help in weird cases where STDOUT_FILENO is not 1...)
+	debug_assert_eq!(stdout_fd, std::io::stdout().as_raw_fd(), "STDOUT_FILENO and io::stdout().as_raw_fd() are not returning the same value.");
+	close_fileno(/*std::io::stdout().as_raw_fd()*/ stdout_fd) // SAFETY: We just assume fd 1 is still open. If it's not (i.e. already been closed), this will return error. 
+            .with_section(move || stdout_fd.header("Attempted to close this fd (STDOUT_FILENO)"))
+            .with_warning(|| format!("It is possible fd {} (STDOUT_FILENO) has already been closed; if so, look for where that happens and prevent it. `stdout` should be closed here.", stdout_fd).header("Possible bug"))
+    }.wrap_err(eyre!("Failed to close stdout"))?;
 
     Ok(())
 }
