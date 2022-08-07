@@ -81,6 +81,21 @@ use bytes::{
     BufMut,
 };
 
+/* TODO: Allow `collect -exec <command>` /proc/self/fds/<memfd OR STDOUT_FILENO>, `collect -exec{} <command> {/proc/self/fds/<memfd OR STDOUT_FILENO>} <other args>`
+struct Options {
+/// If the arguments vector contains `None`, that `None` shall be replaced with the string referring to: If in memfd mode: The `memfd_create()` buffer fd, set to RW, truncated to size, seeked to 0. In this mode, the file will remain open when `ecec` is not `None`, and will instead be returned below, as the mode methods will all be modified to return `Option<Box<dyn ModeReturn + 'static>>::Some(<private struct: impl ModeReturn>)`, which will contain the memfd object so it is dropped *after* the child process has exited. If the mode is *not* memfd, then `STDOUT_FILENO` itself will be used; also set to RW, truncated correctly, and seeked to 0. The return code of this process shall be the return code of the child process once it has terminated.
+/// Execution of commands (if passed) **always** happens *after* the copy to `stdout`, but *before* the **close** of `stdout`. If the copy to `stdout` fails, the exec will not be executed regardless of if the mode required is actually using `stdout`.
+/// The process shall always wait for the child to terminate before exiting. If the child daemon forks, that fork is not followed, and the process exists anyway.
+/// Ideally, A `SIGHUP` handler should be registered, which tells the parent to stop waiting on the child and exit now. TODO: The behaviour of the child is unspecified if this happens. It may be killed, or re-attached to `init`. But the return code of the parent should always be `0` in this case. 
+    exec: Option<(OSString, Vec<Option<OSString>>)> 
+}
+trait ModeReturn: Send {
+fn get_fd_path(&self) -> &Path;
+}
+struct BufferedReturn;
+impl ModeReturn for BufferedReturn { fn get_fd_str(&self) -> &OsStr{ static_assert(STDOUT_FILENO == 1);  "/proc/self/fds/1"  }} /* XXX: In the case where the (compile time) check of STDOUT_FILENO == 0 fails, another boxed struct containing the OSString with the correct path that `impl ModeReturn` can be returned, this path will be removed by the compiler if `STDOUT_FILENO != 1`, allowing for better unboxing analysis. */
+ */
+
 fn init() -> eyre::Result<()>
 {
     cfg_if!{ if #[cfg(feature="logging")] {
