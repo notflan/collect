@@ -96,6 +96,13 @@ struct BufferedReturn;
 impl ModeReturn for BufferedReturn { fn get_fd_str(&self) -> &OsStr{ static_assert(STDOUT_FILENO == 1);  "/proc/self/fds/1"  }} /* XXX: In the case where the (compile time) check of STDOUT_FILENO == 0 fails, another boxed struct containing the OSString with the correct path that `impl ModeReturn` can be returned, this path will be removed by the compiler if `STDOUT_FILENO != 1`, allowing for better unboxing analysis. */
  */
 
+mod args;
+
+trait ModeReturn: Send {
+    
+}
+
+
 fn init() -> eyre::Result<()>
 {
     cfg_if!{ if #[cfg(feature="logging")] {
