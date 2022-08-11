@@ -4,14 +4,76 @@ use std::ffi::{
     OsStr,
     OsString,
 };
-use std::iter;
+use std::{
+    iter,
+    fmt,
+    borrow::Cow,
+};
 
+/// The string used for positional argument replacements in `-exec{}`.
+pub const POSITIONAL_ARG_STRING: &'static str = "{}";
+
+/// Mode for `-exec` / `-exec{}`
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ExecMode
 {
     Stdin{command: OsString, args: Vec<OsString>},
     Positional{command: OsString, args: Vec<Option<OsString>>},
 }
+
+impl fmt::Display for ExecMode
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	#[inline] 
+	fn quote_into<'a, const QUOTE: u8>(string: &'a [u8], f: &mut (impl fmt::Write + ?Sized)) -> fmt::Result
+	{
+	    let data = if let Some(mut location) = memchr::memchr(QUOTE, string) {
+		let mut data = Vec::with_capacity(string.len() * 2);
+		Cow::Owned(loop {
+		    data.extend_from_slice(&string[..location]);
+		    data.extend([b'\\', QUOTE]);
+		    location += match memchr::memchr(QUOTE, &string[location..]) {
+			Some(x) if !&string[(location + x)..].is_empty() => x,
+			_ => break data,
+		    };
+		})
+	    } else {
+		Cow::Borrowed(string)
+	    };
+	    let string = String::from_utf8_lossy(data.as_ref());
+	    
+	    if string.split_whitespace().take(2).count() == 1
+	    {
+		f.write_char(QUOTE as char)?;
+		f.write_str(string.as_ref())?;
+		f.write_char(QUOTE as char)
+	    } else {
+		f.write_str(string.as_ref())
+	    }
+	}
+	match self {
+	    Self::Stdin { command, args } => {
+		quote_into::<b'\''>(command.as_bytes(), f)?;
+		args.iter().map(move |arg| {
+		    use fmt::Write;
+		    f.write_char(' ').and_then(|_| quote_into::<b'"'>(arg.as_bytes(), f))
+		}).collect()
+	    },
+	    Self::Positional { command, args } => {	
+		quote_into::<b'\''>(command.as_bytes(), f)?;
+		args.iter().map(move |arg| {
+		    use fmt::Write;
+		    f.write_char(' ').and_then(|_| match arg.as_ref() {
+			Some(arg) => quote_into::<b'"'>(arg.as_bytes(), f),
+			None => f.write_str(POSITIONAL_ARG_STRING),
+		    })
+		}).collect()
+	    },
+	}
+    }
+}
+
 
 impl ExecMode {
     #[inline(always)] 
@@ -205,10 +267,12 @@ impl Options
     #[inline(always)] 
     fn count_exec(&self) -> (usize, usize)
     {
-	self.exec.iter().map(|x| {
-	    x.is_positional().then(|| (0, 1)).unwrap_or((1, 0))
-	})
-	    .reduce(|(s, p), (s1, p1)| (s + s1, p + p1))
+	self.exec.is_empty().then(|| (0, 0))
+	    .or_else(move ||
+		     self.exec.iter().map(|x| {
+			 x.is_positional().then(|| (0, 1)).unwrap_or((1, 0))
+		     })
+		     .reduce(|(s, p), (s1, p1)| (s + s1, p + p1)))
 	    .unwrap_or((0,0))
     }
     /// Has `-exec` (stdin) or `-exec{}` (positional)
@@ -217,11 +281,13 @@ impl Options
     #[inline(always)] 
     pub fn has_exec(&self) -> (bool, bool)
     {
-	self.exec.iter().map(|x| {
-	    let x = x.is_positional();
-	    (!x, x)
-	})
-	    .reduce(|(s, p), (s1, p1)| (s || s1, p || p1))
+	self.exec.is_empty().then(|| (false, false))
+	    .or_else(move || 
+		     self.exec.iter().map(|x| {
+			 let x = x.is_positional();
+			 (!x, x)
+		     })
+		     .reduce(|(s, p), (s1, p1)| (s || s1, p || p1)))
 	    .unwrap_or((false, false))
     }
     #[inline] 
