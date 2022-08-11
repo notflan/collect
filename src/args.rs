@@ -6,12 +6,22 @@ use std::ffi::{
 };
 use std::{
     iter,
-    fmt,
+    fmt, error,
     borrow::Cow,
 };
+//TODO: When added, the `args` comptime feature will need to enable `lazy_static`.
+use ::lazy_static::lazy_static;
 
 /// The string used for positional argument replacements in `-exec{}`.
 pub const POSITIONAL_ARG_STRING: &'static str = "{}";
+
+/// The token that terminates adding arguments for `-exec` / `-exec{}`.
+///
+/// # Usage
+/// If the user wants multiple `-exec/{}` parameters, they must be seperated with this token. e.g. `sh$ collect -exec c a b c \; -exec{} c2 d {} e f {} g`
+///
+/// It is not required for the user to provide the terminator when the `-exec/{}` is the final argument passed, but they can if they wish. e.g. `sh$ collect -exec command a b c` is valid, and `sh$ collect -exec command a b c \;` is *also* valid. 
+pub const EXEC_MODE_STRING_TERMINATOR: &'static str = ";";
 
 /// Mode for `-exec` / `-exec{}`
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -313,3 +323,79 @@ impl Options
     }
 }
 
+/// The executable name of this program.
+///
+/// # Returns
+/// * If the program's executable name is a valid UTF8 string, that string.
+/// * If it is not, then that string is lossily-converted to a UTF8 string, with invalid characters replaced accordingly. This can be checked by checking if the return value is `Cow::Owned`, if it is, then this is not a reliable indication of the exetuable path's basename.
+/// * If there is no program name provided, i.e. if `argc == 0`, then an empty string is returned.
+#[inline(always)] 
+pub fn program_name() -> Cow<'static, str>
+{
+    lazy_static! {
+	static ref NAME: OsString = std::env::args_os().next().unwrap_or(OsString::from_vec(Vec::new()));
+    }
+    String::from_utf8_lossy(NAME.as_bytes())
+}
+
+/// Parse the program's arguments into an `Options` array.
+/// If parsing fails, an `ArgParseError` is returned detailing why it failed.
+#[inline] 
+#[cfg_attr(feature="logging", instrument(err))]
+pub fn parse_args() -> Result<Options, ArgParseError>
+{
+    parse_from(std::env::args_os().skip(1))
+}
+
+#[cfg_attr(feature="logging", instrument(level="debug", skip_all, fields(args = ?std::any::type_name::<I>())))]
+fn parse_from<I, T>(args: I) -> Result<Options, ArgParseError>
+where I: IntoIterator<Item = T>,
+      T: Into<OsString>
+{
+    mod warnings {
+	use super::*;
+	/// Issue a warning when `-exec{}` is provided as an argument, but no positional arguments (`{}`) are specified in the argument list to the command.
+	#[cold]
+	#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
+	#[cfg_attr(not(feature="logging"), inline(always))]
+	pub fn execp_no_positional_replacements()
+	{
+	    if_trace!(warn!("-exec{{}} provided with no positional arguments ({}), there will be no replacement with the data. Did you mean `-exec`?", POSITIONAL_ARG_STRING));
+	}
+	/// Issue a warning if the user apparently meant to specify two `-exec/{}` arguments to `collect`, but seemingly is accidentally is passing the `-exec/{}` string as an argument to the first.
+	#[cold]
+	#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
+	#[cfg_attr(not(feature="logging"), inline(always))]
+	pub fn exec_apparent_missing_terminator(first_is_positional: bool, second_is_positional: bool, command: &str, argument_number: usize)
+	{
+	    if_trace! {
+		warn!("{} provided, but argument to command {command:?} number {argument_number} is {}. Are you missing the terminator before '{}' before this argument?", if first_is_positional {"-exec{{}}"} else {"-exec"}, if second_is_positional {"-exec{{}}"} else {"-exec"}, EXEC_MODE_STRING_TERMINATOR)
+	    }
+	}	
+    }
+    
+    let mut args = args.into_iter().map(Into::into);
+    //XXX: When `-exec{}` is provided, but no `{}` arguments are found, maybe issue a warning with `if_trace!(warning!())`? There are valid situations to do this in, but they are rare...
+    todo!("//TODO: Parse `args` into `Options`")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ArgParseError
+{
+    /// Returned when an invalid or unknown argument is found
+    UnknownOption(OsString),
+    /// Returned when the argument, `argument`, is passed in an invalid context by the user.
+    InvalidUsage { argument: String, message: String },
+}
+
+impl error::Error for ArgParseError{}
+impl fmt::Display for ArgParseError
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+	match self {
+	    Self::UnknownOption(opt) => f.write_str(String::from_utf8_lossy(opt.as_bytes()).as_ref()),
+	    Self::InvalidUsage { argument, message } => write!(f, "Invalid usage for argument `{argument}`: {message}")
+	}
+    }
+}
