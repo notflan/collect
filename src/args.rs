@@ -404,10 +404,13 @@ where I: IntoIterator<Item = T>,
 		/*($parser:path => $then:expr) => {
 		    $then(try_parse_for!(try $parser => std::convert::identity)?)
 		}*/
-	    }
-	    
+	    }	    
+	    //TODO: Add `impl TryParse` struct for `--help` and add it at the *top* of the visitation stack (it will most likely appear there.)
+	    // This may require a re-work of the `Options` struct, or an enum wrapper around it should be returned instead of options directly, for special modes (like `--help` is, etc.) Perhaps `pub enum Mode { Normal(Options), Help, }` or something should be returned, and `impl From<Options>` for it, with the caller of this closure (below) 
 	    try_parse_for!(parsers::ExecMode => |result| output.exec.push(result));
-	    //TODO: try_parse_for!(parsers::SomeOtherOption => |result| output.some_other_option.set(result.something)), etc, for any newly added arguments.
+	    
+	    //Note: try_parse_for!(parsers::SomeOtherOption => |result| output.some_other_option.set(result.something)), etc, for any newly added arguments.
+	    
 	    if_trace!(debug!("reached end of parser visitation for argument #{idx} {arg:?}! Failing now with `UnknownOption`"));
 	    return Err(ArgParseError::UnknownOption(arg));
 	}
@@ -415,7 +418,7 @@ where I: IntoIterator<Item = T>,
     };
     parser()
 	.with_index(idx)
-	.map(move |_| output)
+	.map(move |_| output.into()) //XXX: This is `output.into()`, because when successful result return type is changed from directly `Options` to `enum Mode` (which will `impl From<Options>`), it will allow any `impl Into<Mode>` to be returned. (Boxed dynamic dispatch with a trait `impl FromMode<T: ?Sized> (for Mode) { fn from(val: Box<T>) -> Self { IntoMode::into(val) } }, auto impl trait IntoMode { fn into(self: Box<Self>) -> Mode }` may be required if different types are returned from the closure, this is okay, as argument parsed struct can get rather large.)
 }
 
 #[derive(Debug)]
