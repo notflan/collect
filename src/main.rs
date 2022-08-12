@@ -87,7 +87,7 @@ struct Options {
 /// Execution of commands (if passed) **always** happens *after* the copy to `stdout`, but *before* the **close** of `stdout`. If the copy to `stdout` fails, the exec will not be executed regardless of if the mode required is actually using `stdout`.
 /// The process shall always wait for the child to terminate before exiting. If the child daemon forks, that fork is not followed, and the process exists anyway.
 /// Ideally, A `SIGHUP` handler should be registered, which tells the parent to stop waiting on the child and exit now. TODO: The behaviour of the child is unspecified if this happens. It may be killed, or re-attached to `init`. But the return code of the parent should always be `0` in this case. 
-    exec: Option<(OSString, Vec<Option<OSString>>)> 
+exec: Option<(OSString, Vec<Option<OSString>>)> 
 }
 trait ModeReturn: Send {
 fn get_fd_path(&self) -> &Path;
@@ -499,11 +499,26 @@ fn close_fileno<T: IntoRawFd>(fd: T) -> eyre::Result<()>
     }
 }
 
+fn parse_args() -> eyre::Result<args::Options>
+{
+    args::parse_args()
+	.wrap_err("Parsing arguments failed")
+	.with_section(|| std::env::args_os().skip(1)
+		      .map(|x| std::borrow::Cow::Owned(String::from_utf8_lossy(&x.into_vec()).into_owned()))
+		      .join_by_clone(std::borrow::Cow::Borrowed(" ")) //XXX: this can be replaced by `flat_map() -> [x, " "]` really... Dunno which will be faster...
+		      .collect::<String>()
+		      .header("The program arguments were"))
+	.with_suggestion(|| "Try passing `--help`")
+}
+
 #[cfg_attr(feature="logging", instrument(err))]
 fn main() -> eyre::Result<()> {
     init()?;
     feature_check()?;
     if_trace!(debug!("initialised"));
+
+    //TODO: How to cleanly feature-gate `args`?
+    let opt = parse_args()?;
 
     //TODO: maybe look into fd SEALing? Maybe we can prevent a consumer process from reading from stdout until we've finished the transfer. The name SEAL sounds like it might have something to do with that?
     cfg_if!{ 

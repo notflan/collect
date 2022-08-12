@@ -340,8 +340,8 @@ pub fn program_name() -> Cow<'static, str>
 
 /// Parse the program's arguments into an `Options` array.
 /// If parsing fails, an `ArgParseError` is returned detailing why it failed.
-#[inline] 
-#[cfg_attr(feature="logging", instrument(err))]
+#[inline]
+#[cfg_attr(feature="logging", instrument(err(Display)))]
 pub fn parse_args() -> Result<Options, ArgParseError>
 {
     parse_from(std::env::args_os().skip(1))
@@ -351,51 +351,295 @@ pub fn parse_args() -> Result<Options, ArgParseError>
 fn parse_from<I, T>(args: I) -> Result<Options, ArgParseError>
 where I: IntoIterator<Item = T>,
       T: Into<OsString>
-{
-    mod warnings {
-	use super::*;
-	/// Issue a warning when `-exec{}` is provided as an argument, but no positional arguments (`{}`) are specified in the argument list to the command.
-	#[cold]
-	#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
-	#[cfg_attr(not(feature="logging"), inline(always))]
-	pub fn execp_no_positional_replacements()
-	{
-	    if_trace!(warn!("-exec{{}} provided with no positional arguments ({}), there will be no replacement with the data. Did you mean `-exec`?", POSITIONAL_ARG_STRING));
-	}
-	/// Issue a warning if the user apparently meant to specify two `-exec/{}` arguments to `collect`, but seemingly is accidentally is passing the `-exec/{}` string as an argument to the first.
-	#[cold]
-	#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
-	#[cfg_attr(not(feature="logging"), inline(always))]
-	pub fn exec_apparent_missing_terminator(first_is_positional: bool, second_is_positional: bool, command: &str, argument_number: usize)
-	{
-	    if_trace! {
-		warn!("{} provided, but argument to command {command:?} number {argument_number} is {}. Are you missing the terminator before '{}' before this argument?", if first_is_positional {"-exec{{}}"} else {"-exec"}, if second_is_positional {"-exec{{}}"} else {"-exec"}, EXEC_MODE_STRING_TERMINATOR)
-	    }
-	}	
-    }
-    
+{   
     let mut args = args.into_iter().map(Into::into);
+    let mut output = Options::default();
+    let mut idx = 0;
     //XXX: When `-exec{}` is provided, but no `{}` arguments are found, maybe issue a warning with `if_trace!(warning!())`? There are valid situations to do this in, but they are rare...
-    todo!("//TODO: Parse `args` into `Options`")
+    let mut parser = || -> Result<_, ArgParseError> {
+	while let Some(mut arg) = args.next() {
+	    idx += 1;
+	    macro_rules! try_parse_for {
+		(@ assert_parser_okay $parser:path) => {
+		    const _:() = {
+			const fn _assert_is_parser<P: TryParse + ?Sized>() {}
+			const fn _assert_is_result<P: TryParse + ?Sized>(res: P::Output) -> P::Output { res }
+			
+			_assert_is_parser::<$parser>();
+		    };
+		};
+		(try $parser:path => $then:expr$(, $or:expr)?) => {
+		    {
+			try_parse_for!(@ assert_parser_okay $parser);
+			//_assert_is_closure(&$then); //XXX: There isn't a good way to tell without having to specify some bound on return type...
+			if let Some(result) = parsers::try_parse_with::<$parser>(&mut arg, &mut args) {
+			    $(let result = result.map_err($or);)?
+				result.map($then)    
+			} else {
+			    continue
+			}
+		    }
+		};
+		($parser:path => $then:expr) => {
+		    $then(try_parse_for!(try $parser => std::convert::identity)?)
+		}
+	    }
+	    
+	    try_parse_for!(try parsers::ExecMode => |result| output.exec.push(result))?;
+	}
+	Ok(())
+    };
+    parser()
+	.with_index(idx)
+	.map(move |_| output)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 pub enum ArgParseError
 {
+    /// With an added argument index.
+    WithIndex(usize, Box<ArgParseError>),
     /// Returned when an invalid or unknown argument is found
     UnknownOption(OsString),
     /// Returned when the argument, `argument`, is passed in an invalid context by the user.
-    InvalidUsage { argument: String, message: String },
+    InvalidUsage { argument: String, message: String, inner: Option<Box<dyn error::Error + Send + Sync + 'static>> },
 }
 
-impl error::Error for ArgParseError{}
+trait ArgParseErrorExt<T>: Sized
+{
+    fn with_index(self, idx: usize) -> Result<T, ArgParseError>;
+}
+impl ArgParseError
+{
+    #[inline] 
+    pub fn wrap_index(self, idx: usize) -> Self {
+	Self::WithIndex(idx, Box::new(self))
+    }
+}
+impl<T, E: Into<ArgParseError>> ArgParseErrorExt<T> for Result<T, E>
+{
+    #[inline(always)] 
+    fn with_index(self, idx: usize) -> Result<T, ArgParseError> {
+	self.map_err(Into::into)
+	    .map_err(move |e| e.wrap_index(idx))
+    }
+}
+
+impl error::Error for ArgParseError
+{
+    #[inline] 
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+	match self {
+	    Self::InvalidUsage { inner, .. } => inner.as_ref().map(|x| -> &(dyn error::Error + 'static) {  x.as_ref() }),
+	    Self::WithIndex(_, inner) => inner.source(),
+	    _ => None,
+	}
+    }
+}
 impl fmt::Display for ArgParseError
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
 	match self {
+	    Self::WithIndex(index, inner) => write!(f, "Argument #{index}: {inner}"),
 	    Self::UnknownOption(opt) => f.write_str(String::from_utf8_lossy(opt.as_bytes()).as_ref()),
-	    Self::InvalidUsage { argument, message } => write!(f, "Invalid usage for argument `{argument}`: {message}")
+	    Self::InvalidUsage { argument, message, .. } => write!(f, "Invalid usage for argument `{argument}`: {message}")
+	}
+    }
+}
+
+trait ArgError: error::Error + Send + Sync + 'static
+{
+    fn into_invalid_usage(self) -> (String, String, Box<dyn error::Error + Send + Sync + 'static>)
+    where Self: Sized;
+}
+
+trait TryParse: Sized
+{
+    type Error: ArgError;
+    type Output;
+    
+    #[inline(always)] 
+    fn visit(argument: &OsStr) -> Option<Self> { let _ = argument;  None }
+    fn parse<I: ?Sized>(self, argument: OsString, rest: &mut I) -> Result<Self::Output, Self::Error>
+    where I: Iterator<Item = OsString>;
+}
+
+impl<E: error::Error + Send + Sync + 'static> From<(String, String, E)> for ArgParseError
+{
+    #[inline] 
+    fn from((argument, message, inner): (String, String, E)) -> Self
+    {
+	Self::InvalidUsage { argument, message, inner: Some(Box::new(inner)) }
+    }
+}
+
+impl<E: ArgError> From<E> for ArgParseError
+{
+    #[inline(always)] 
+    fn from(from: E) -> Self
+    {
+	let (argument, message, inner) = from.into_invalid_usage();
+	Self::InvalidUsage { argument, message, inner: Some(inner) }
+    }
+}
+
+mod parsers {
+    use super::*;
+
+    #[inline(always)]
+    #[cfg_attr(feature="logging", instrument(level="trace", skip(rest), fields(parser = ?std::any::type_name::<P>())))]
+    pub(super) fn try_parse_with<P>(arg: &mut OsString, rest: &mut impl Iterator<Item = OsString>) -> Option<Result<P::Output, ArgParseError>>
+    where P: TryParse
+    {
+	#[cfg(feature="logging")] 
+	let _span = tracing::debug_span!("parse");
+	P::visit(arg.as_os_str()).map(move |parser| {
+	    #[cfg(feature="logging")]
+	    let _in = _span.enter();
+	    parser.parse(std::mem::replace(arg, OsString::default()), rest).map_err(Into::into)
+	}).map(|res| {
+	    #[cfg(feature="logging")]
+	    match res.as_ref() {
+		Err(err) => {
+		    ::tracing::event!(::tracing::Level::ERROR, ?err, "Attempted parse failed with error")
+		},
+		_ => ()
+	    }
+	    res
+	}).or_else(|| {
+	    #[cfg(feature="logging")]
+	    ::tracing::event!(::tracing::Level::TRACE, "no match");
+	    None
+	})
+    }
+
+    /// Parser for `ExecMode`
+    ///
+    /// Parses `-exec` / `-exec{}` modes.
+    #[derive(Debug, Clone, Copy)]
+    pub enum ExecMode {
+	Stdin,
+	Postional,
+    }
+    impl ExecMode {
+	#[inline(always)] 
+	fn is_positional(&self) -> bool
+	{
+	    match self {
+		Self::Postional => true,
+		_ => false
+	    }
+	}
+	#[inline(always)] 
+	fn command_string(&self) -> &'static str
+	{
+	    if self.is_positional() {
+		"-exec{}"
+	    } else {
+		"-exec"
+	    }
+	}
+	
+    }
+    
+    #[derive(Debug)]
+    pub struct ExecModeParseError(ExecMode);
+    impl error::Error for ExecModeParseError{}
+    impl fmt::Display for ExecModeParseError
+    {
+	#[inline(always)]
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+	{
+	    write!(f, "{} needs at least a command", self.0.command_string())
+	}
+    }
+
+    impl ArgError for ExecModeParseError
+    {
+	fn into_invalid_usage(self) -> (String, String, Box<dyn error::Error + Send + Sync + 'static>)
+	where Self: Sized {
+	    (self.0.command_string().to_owned(), "Expected a command file-path to execute.".to_owned(), Box::new(self))
+	}
+    }
+
+    impl TryParse for ExecMode
+    {
+	type Error = ExecModeParseError;
+	type Output = super::ExecMode;
+	#[inline(always)] 
+	fn visit(argument: &OsStr) -> Option<Self> {
+	    
+	    if argument == OsStr::from_bytes(b"-exec") {
+		Some(Self::Stdin)
+	    } else if argument == OsStr::from_bytes(b"-exec{}") {
+		Some(Self::Postional)
+	    } else {
+		None
+	    }
+	}
+
+	#[inline] 
+	fn parse<I: ?Sized>(self, _argument: OsString, rest: &mut I) -> Result<Self::Output, Self::Error>
+	where I: Iterator<Item = OsString> {
+	    mod warnings {
+		use super::*;
+		/// Issue a warning when `-exec{}` is provided as an argument, but no positional arguments (`{}`) are specified in the argument list to the command.
+		#[cold]
+		#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
+		#[cfg_attr(not(feature="logging"), inline(always))]
+		pub fn execp_no_positional_replacements()
+		{
+		    if_trace!(warn!("-exec{{}} provided with no positional arguments ({}), there will be no replacement with the data. Did you mean `-exec`?", POSITIONAL_ARG_STRING));
+		}
+		/// Issue a warning if the user apparently meant to specify two `-exec/{}` arguments to `collect`, but seemingly is accidentally is passing the `-exec/{}` string as an argument to the first.
+		#[cold]
+		#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
+		#[cfg_attr(not(feature="logging"), inline(always))]
+		pub fn exec_apparent_missing_terminator(first_is_positional: bool, second_is_positional: bool, command: &OsStr, argument_number: usize)
+		{
+		    if_trace! {
+			warn!("{} provided, but argument to command {command:?} number #{argument_number} is `{}`. Are you missing the terminator '{}' before this argument?", if first_is_positional {"-exec{}"} else {"-exec"}, if second_is_positional {"-exec{}"} else {"-exec"}, EXEC_MODE_STRING_TERMINATOR)
+		    }
+		}	
+	    }
+	    
+	    let command = rest.next().ok_or_else(|| ExecModeParseError(self))?;
+	    let test_warn_missing_term = |(idx , string) : (usize, OsString)| {
+		if let Some(val) = Self::visit(&string) {
+		    warnings::exec_apparent_missing_terminator(self.is_positional(), val.is_positional(), &command, idx);
+		}
+		string
+	    };
+	    Ok(match self {
+		Self::Stdin => {
+		    super::ExecMode::Stdin {
+			args: rest
+			    .take_while(|argument| argument.as_bytes() != EXEC_MODE_STRING_TERMINATOR.as_bytes())
+			    .enumerate().map(&test_warn_missing_term)
+			    .collect(),
+			command,
+		    }
+		},
+		Self::Postional => {
+		    let mut repl_warn = true;
+		    let res = super::ExecMode::Positional {
+			args: rest
+			    .take_while(|argument| argument.as_bytes() != EXEC_MODE_STRING_TERMINATOR.as_bytes())
+			    .enumerate().map(&test_warn_missing_term)
+			    .map(|x| if x.as_bytes() == POSITIONAL_ARG_STRING.as_bytes() {
+				repl_warn = false;
+				None
+			    } else {
+				Some(x)
+			    })
+			    .collect(),
+			command,
+		    };
+		    if repl_warn { warnings::execp_no_positional_replacements(); }
+		    res
+		},
+	    })
 	}
     }
 }

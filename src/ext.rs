@@ -7,6 +7,7 @@ use std::{
     },
     marker::PhantomData,
     ops,
+    iter,
 };
 
 /// Essentially equivelant bound as `eyre::StdError` (private trait)
@@ -15,6 +16,112 @@ use std::{
 pub trait EyreError: std::error::Error + Send + Sync + 'static{}
 impl<T: ?Sized> EyreError for T
 where T: std::error::Error + Send + Sync + 'static{}
+
+#[derive(Debug, Clone)]
+pub struct Joiner<I, F>(I, F, bool);
+
+#[derive(Debug, Clone, Copy)]
+pub struct CloneJoiner<T>(T);
+
+impl<I, F> Joiner<I, F>
+{
+    #[inline(always)]
+    fn size_calc(low: usize) -> usize
+    {
+	match low {
+	    0 | 1 => low,
+	    2 => 4,
+	    x if x % 2 == 0 => x * 2,
+	    odd => (odd * 2) - 1
+	}
+    }
+}
+type JoinerExt = Joiner<std::convert::Infallible, std::convert::Infallible>;
+
+impl<I, F> Iterator for Joiner<I, F>
+where I: Iterator, F: FnMut() -> I::Item
+{
+    type Item = I::Item;
+
+    #[inline] 
+    fn next(&mut self) -> Option<Self::Item> {
+	let val = match self.2 {
+	    false => self.0.next(),
+	    true => Some(self.1())
+	};
+	if val.is_some() {
+	    self.2 ^= true;
+	}
+	val
+    }
+
+    #[inline] 
+    fn size_hint(&self) -> (usize, Option<usize>) {
+	let (low, high) = self.0.size_hint();
+	(Self::size_calc(low), high.map(Self::size_calc))
+    }
+}
+
+impl<I, T> Iterator for Joiner<I, CloneJoiner<T>>
+where I: Iterator<Item = T>, T: Clone
+{
+    type Item = I::Item;
+
+    #[inline] 
+    fn next(&mut self) -> Option<Self::Item> {
+	let val = match self.2 {
+	    false => self.0.next(),
+	    true => Some(self.1.0.clone())
+	};
+	if val.is_some() {
+	    self.2 ^= true;
+	}
+	val
+    }
+
+    #[inline] 
+    fn size_hint(&self) -> (usize, Option<usize>) {
+	let (low, high) = self.0.size_hint();
+	(Self::size_calc(low), high.map(Self::size_calc))
+    }
+}
+
+impl<I, F> iter::FusedIterator for Joiner<I, F>
+where Joiner<I,F>: Iterator,
+      I: iter::FusedIterator{}
+impl<I, F> ExactSizeIterator for Joiner<I, F>
+where Joiner<I,F>: Iterator,
+      I: ExactSizeIterator {}
+
+pub trait IterJoinExt<T>: Sized
+{    
+    fn join_by<F: FnMut() -> T>(self, joiner: F) -> Joiner<Self, F>;
+    fn join_by_default(self) -> Joiner<Self, fn () -> T>
+    where T: Default;
+    fn join_by_clone(self, value: T) -> Joiner<Self, CloneJoiner<T>>
+    where T: Clone;
+
+}
+
+impl<I, T> IterJoinExt<T> for I
+where I: Iterator<Item = T>
+{
+    #[inline] 
+    fn join_by<F: FnMut() -> T>(self, joiner: F) -> Joiner<Self, F> {
+	Joiner(self, joiner, false)
+    }
+    #[inline] 
+    fn join_by_default(self) -> Joiner<Self, fn () -> T>
+    where T: Default
+    {
+	Joiner(self, T::default, false)
+    }
+    #[inline] 
+    fn join_by_clone(self, value: T) -> Joiner<Self, CloneJoiner<T>>
+    where T: Clone {
+	Joiner(self, CloneJoiner(value), false)
+    }
+}
 
 pub trait IntoEyre<T>
 {
