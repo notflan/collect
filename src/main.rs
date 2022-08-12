@@ -22,6 +22,21 @@ macro_rules! if_trace {
 	    }
 	}
     };
+    (true $yes:expr$(; $no:expr)?) => {
+	{
+	    #[allow(unused_variables)]
+	    {
+		let val = cfg!(feature="logging");
+		#[cfg(feature="logging")]
+		let val = { $yes };
+		$(
+		    #[cfg(not(feature="logging"))]
+		    let val = { $no };
+		    )?
+		val
+	    }
+	}
+    };
 }
 
 #[cfg(feature="jemalloc")] 
@@ -159,7 +174,7 @@ mod work {
     #[inline] 
     pub(super) fn buffered() -> eyre::Result<()>
     {
-	if_trace!(trace!("strategy: allocated buffer"));
+	if_trace!(info!("strategy: allocated buffer"));
 	
 	let (bytes, read) = {
 	    let stdin = io::stdin();
@@ -210,7 +225,7 @@ mod work {
 	    }
 	};
 	
-	if_trace!(trace!("strategy: mapped memory file"));
+	if_trace!(info!("strategy: mapped memory file"));
 
 	use std::borrow::Borrow;
 
@@ -504,10 +519,12 @@ fn parse_args() -> eyre::Result<args::Options>
     args::parse_args()
 	.wrap_err("Parsing arguments failed")
 	.with_section(|| std::env::args_os().skip(1)
-		      .map(|x| std::borrow::Cow::Owned(String::from_utf8_lossy(&x.into_vec()).into_owned()))
+		      .map(|x| std::borrow::Cow::Owned(format!("{x:?}")))
 		      .join_by_clone(std::borrow::Cow::Borrowed(" ")) //XXX: this can be replaced by `flat_map() -> [x, " "]` really... Dunno which will be faster...
 		      .collect::<String>()
-		      .header("The program arguments were"))
+		      .header("Program arguments (argv+1) were"))
+	.with_section(|| args::program_name().header("Program name (*argv) was"))
+	.with_section(|| std::env::args_os().len().header("Total numer of arguments, including program name (argc) was"))
 	.with_suggestion(|| "Try passing `--help`")
 }
 
@@ -518,7 +535,15 @@ fn main() -> eyre::Result<()> {
     if_trace!(debug!("initialised"));
 
     //TODO: How to cleanly feature-gate `args`?
-    let opt = parse_args()?;
+    let opt = {
+	#[cfg(feature="logging")]
+	let _span = debug_span!("args");
+	#[cfg(feature="logging")]
+	let _in_span = _span.enter();
+	let parsed = parse_args()?;
+	if_trace!(debug!("Parsed arguments: {parsed:?}"));
+	parsed
+    };
 
     //TODO: maybe look into fd SEALing? Maybe we can prevent a consumer process from reading from stdout until we've finished the transfer. The name SEAL sounds like it might have something to do with that?
     cfg_if!{ 

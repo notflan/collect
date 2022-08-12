@@ -9,6 +9,7 @@ use std::{
     fmt, error,
     borrow::Cow,
 };
+use std::any::type_name;
 //TODO: When added, the `args` comptime feature will need to enable `lazy_static`.
 use ::lazy_static::lazy_static;
 
@@ -341,13 +342,32 @@ pub fn program_name() -> Cow<'static, str>
 /// Parse the program's arguments into an `Options` array.
 /// If parsing fails, an `ArgParseError` is returned detailing why it failed.
 #[inline]
-#[cfg_attr(feature="logging", instrument(err(Display)))]
+#[cfg_attr(feature="logging", instrument(err(Debug)))]
 pub fn parse_args() -> Result<Options, ArgParseError>
 {
-    parse_from(std::env::args_os().skip(1))
+    let iter = std::env::args_os();
+    if_trace!(trace!("argc == {}, argv == {iter:?}", iter.len()));
+    
+    parse_from(iter.skip(1))
 }
 
-#[cfg_attr(feature="logging", instrument(level="debug", skip_all, fields(args = ?std::any::type_name::<I>())))]
+#[inline(always)] 
+pub fn type_name_short<T: ?Sized>() -> &'static str
+{
+    let mut s = std::any::type_name::<T>();
+    if let Some(idx) = memchr::memrchr(b':', s.as_bytes()) {
+	s = &s[idx.saturating_sub(1)..];
+	if s.len() >= 2 && &s[..2] == "::" {
+	    s = &s[2..];
+	}
+    }
+    if s.len() > 0 && (s.as_bytes()[s.len()-1] == b'>' && s.as_bytes()[0] != b'<') {
+	s = &s[..(s.len()-1)];
+    }
+    s
+}
+
+#[cfg_attr(feature="logging", instrument(level="debug", skip_all, fields(args = ?type_name_short::<I>())))]
 fn parse_from<I, T>(args: I) -> Result<Options, ArgParseError>
 where I: IntoIterator<Item = T>,
       T: Into<OsString>
@@ -368,24 +388,28 @@ where I: IntoIterator<Item = T>,
 			_assert_is_parser::<$parser>();
 		    };
 		};
-		(try $parser:path => $then:expr$(, $or:expr)?) => {
+		($parser:path => $then:expr) => {
 		    {
 			try_parse_for!(@ assert_parser_okay $parser);
 			//_assert_is_closure(&$then); //XXX: There isn't a good way to tell without having to specify some bound on return type...
 			if let Some(result) = parsers::try_parse_with::<$parser>(&mut arg, &mut args) {
-			    $(let result = result.map_err($or);)?
-				result.map($then)    
-			} else {
-			    continue
+			    
+			    // Result succeeded on visitation, use this parser for this argument and then continue to the next one.
+			    $then(result?);
+			    continue;
 			}
+			// Result failed on visitation, so continue the control flow to the next `try_parse_for!()` visitation attempt.
 		    }
 		};
-		($parser:path => $then:expr) => {
+		/*($parser:path => $then:expr) => {
 		    $then(try_parse_for!(try $parser => std::convert::identity)?)
-		}
+		}*/
 	    }
 	    
-	    try_parse_for!(try parsers::ExecMode => |result| output.exec.push(result))?;
+	    try_parse_for!(parsers::ExecMode => |result| output.exec.push(result));
+	    //TODO: try_parse_for!(parsers::SomeOtherOption => |result| output.some_other_option.set(result.something)), etc, for any newly added arguments.
+	    if_trace!(debug!("reached end of parser visitation for argument #{idx} {arg:?}! Failing now with `UnknownOption`"));
+	    return Err(ArgParseError::UnknownOption(arg));
 	}
 	Ok(())
     };
@@ -403,6 +427,8 @@ pub enum ArgParseError
     UnknownOption(OsString),
     /// Returned when the argument, `argument`, is passed in an invalid context by the user.
     InvalidUsage { argument: String, message: String, inner: Option<Box<dyn error::Error + Send + Sync + 'static>> },
+    //VisitationFailed,
+    
 }
 
 trait ArgParseErrorExt<T>: Sized
@@ -442,7 +468,11 @@ impl fmt::Display for ArgParseError
     {
 	match self {
 	    Self::WithIndex(index, inner) => write!(f, "Argument #{index}: {inner}"),
-	    Self::UnknownOption(opt) => f.write_str(String::from_utf8_lossy(opt.as_bytes()).as_ref()),
+	    Self::UnknownOption(opt) => {
+		f.write_str("Invalid/unknown argument: `")?;
+		f.write_str(String::from_utf8_lossy(opt.as_bytes()).as_ref())?;
+		f.write_str("`")
+	    },
 	    Self::InvalidUsage { argument, message, .. } => write!(f, "Invalid usage for argument `{argument}`: {message}")
 	}
     }
@@ -484,20 +514,57 @@ impl<E: ArgError> From<E> for ArgParseError
     }
 }
 
+#[inline(always)] 
+fn extract_last_pathspec<'a>(s: &'a str) -> &'a str
+{
+    //#[cfg_attr(feature="logging", feature(instrument(ret)))]
+    #[allow(dead_code)]
+    fn string_diff<'a>(a: &'a str, b: &'a str) -> usize
+    {
+	#[cold]
+	#[inline(never)]
+	fn _panic_non_inclusive(swap: bool) -> !
+	{
+	    let a = swap.then(|| "b").unwrap_or("a");
+	    let b = swap.then(|| "a").unwrap_or("b");
+	    panic!("String {a} was not inside string {b}")
+	}
+	let a_addr = a.as_ptr() as usize;
+	let b_addr = b.as_ptr() as usize;
+	let (a_addr, b_addr, sw) = 
+	    if !(a_addr + a.len() > b_addr + b.len() && b_addr + b.len() < a_addr + a.len()) {
+		(b_addr, a_addr, true)
+	    } else {
+		(a_addr, a_addr, false)
+	    };
+	
+	if b_addr < a_addr /*XXX || (b_addr + b.len()) > (a_addr + a.len())*/ {
+	    _panic_non_inclusive(sw)
+	}
+	return a_addr.abs_diff(b_addr);
+    }
+    s.rsplit_once("::")
+	.map(|(_a, b)| /*XXX: This doesn't work...match _a.rsplit_once("::") {
+	     Some((_, last)) => &s[string_diff(s, last)..],
+	     _ => b
+	}*/ b)
+	.unwrap_or(s)
+}
+
 mod parsers {
     use super::*;
 
     #[inline(always)]
-    #[cfg_attr(feature="logging", instrument(level="trace", skip(rest), fields(parser = ?std::any::type_name::<P>())))]
+    #[cfg_attr(feature="logging", instrument(level="debug", skip(rest), fields(parser = %extract_last_pathspec(type_name::<P>()))))]
     pub(super) fn try_parse_with<P>(arg: &mut OsString, rest: &mut impl Iterator<Item = OsString>) -> Option<Result<P::Output, ArgParseError>>
     where P: TryParse
     {
 	#[cfg(feature="logging")] 
-	let _span = tracing::debug_span!("parse");
+	let _span = tracing::warn_span!("parse", parser= %extract_last_pathspec(type_name::<P>()), ?arg);
 	P::visit(arg.as_os_str()).map(move |parser| {
 	    #[cfg(feature="logging")]
 	    let _in = _span.enter();
-	    parser.parse(std::mem::replace(arg, OsString::default()), rest).map_err(Into::into)
+	    parser.parse(/*if_trace!{true arg.clone(); */std::mem::replace(arg, OsString::default()) /*}*/, rest).map_err(Into::into) //This clone is not needed, the argument is captured by `try_parse_with` (in debug) and `parse` (in warning) already.
 	}).map(|res| {
 	    #[cfg(feature="logging")]
 	    match res.as_ref() {
@@ -509,7 +576,7 @@ mod parsers {
 	    res
 	}).or_else(|| {
 	    #[cfg(feature="logging")]
-	    ::tracing::event!(::tracing::Level::TRACE, "no match");
+	    ::tracing::event!(::tracing::Level::TRACE, "no match for this parser with this arg, continuing visitation.");
 	    None
 	})
     }
@@ -586,28 +653,54 @@ mod parsers {
 		use super::*;
 		/// Issue a warning when `-exec{}` is provided as an argument, but no positional arguments (`{}`) are specified in the argument list to the command.
 		#[cold]
-		#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
+		#[cfg_attr(feature="logging", inline(never))]
 		#[cfg_attr(not(feature="logging"), inline(always))]
 		pub fn execp_no_positional_replacements()
 		{
-		    if_trace!(warn!("-exec{{}} provided with no positional arguments ({}), there will be no replacement with the data. Did you mean `-exec`?", POSITIONAL_ARG_STRING));
+		    if_trace!(warn!("-exec{{}} provided with no positional arguments `{}`, there will be no replacement with the data. Did you mean `-exec`?", POSITIONAL_ARG_STRING));
 		}
 		/// Issue a warning if the user apparently meant to specify two `-exec/{}` arguments to `collect`, but seemingly is accidentally is passing the `-exec/{}` string as an argument to the first.
 		#[cold]
-		#[cfg_attr(feature="logging", inline(never), instrument(level="trace"))]
+		#[cfg_attr(feature="logging", inline(never))]
 		#[cfg_attr(not(feature="logging"), inline(always))]
 		pub fn exec_apparent_missing_terminator(first_is_positional: bool, second_is_positional: bool, command: &OsStr, argument_number: usize)
 		{
 		    if_trace! {
 			warn!("{} provided, but argument to command {command:?} number #{argument_number} is `{}`. Are you missing the terminator '{}' before this argument?", if first_is_positional {"-exec{}"} else {"-exec"}, if second_is_positional {"-exec{}"} else {"-exec"}, EXEC_MODE_STRING_TERMINATOR)
 		    }
-		}	
+		}
+
+		/// Issue a warning if the user apparently missed a command to `-exec{}`, and has typed `-exec{} {}`...
+		#[cold]
+		#[cfg_attr(feature="logging", inline(never))]
+		#[cfg_attr(not(feature="logging"), inline(always))]
+		//TODO: Do we make this a feature in the future? Being able to `fexecve()` the input received?
+		pub fn execp_command_not_substituted()
+		{
+		    if_trace! {
+			warn!("-exec{{}} provided with a command as the positional replacement string `{}`. Commands are not substituted. Are you missing a command? (Note: Currently, `fexecve()`ing the input is not supported.)", POSITIONAL_ARG_STRING)
+		    }
+		}
+		
+		/// Issue a warning if the user apparently attempted to terminate a `-exec/{}` argument, but instead made the command of the `-exec/{}` itself the terminator.
+		#[cold]
+		#[cfg_attr(feature="logging", inline(never))]
+		#[cfg_attr(not(feature="logging"), inline(always))]
+		pub fn exec_terminator_as_command(exec_arg_str: &str)
+		{
+		    if_trace! {
+			warn!("{exec_arg_str} provided with a command that is the -exec/-exec{{}} terminator character `{}`. The sequence is not terminated, and instead the terminator character itself is taken as the command to execute. Did you miss a command before the terminator?", EXEC_MODE_STRING_TERMINATOR)
+		    }
+		}
 	    }
 	    
 	    let command = rest.next().ok_or_else(|| ExecModeParseError(self))?;
+	    if command == EXEC_MODE_STRING_TERMINATOR {
+		warnings::exec_terminator_as_command(self.command_string());
+	    }
 	    let test_warn_missing_term = |(idx , string) : (usize, OsString)| {
 		if let Some(val) = Self::visit(&string) {
-		    warnings::exec_apparent_missing_terminator(self.is_positional(), val.is_positional(), &command, idx);
+		    warnings::exec_apparent_missing_terminator(self.is_positional(), val.is_positional(), &command, idx + 1);
 		}
 		string
 	    };
@@ -623,6 +716,9 @@ mod parsers {
 		},
 		Self::Postional => {
 		    let mut repl_warn = true;
+		    if command == POSITIONAL_ARG_STRING {
+			warnings::execp_command_not_substituted();
+		    }
 		    let res = super::ExecMode::Positional {
 			args: rest
 			    .take_while(|argument| argument.as_bytes() != EXEC_MODE_STRING_TERMINATOR.as_bytes())
