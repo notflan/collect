@@ -3,7 +3,7 @@
 #[cfg(feature="logging")] 
 #[macro_use] extern crate tracing;
 
-#[cfg(feature="memfile")] 
+//#[cfg(feature="memfile")] 
 #[macro_use] extern crate lazy_static;
 
 /// Run this statement only if `tracing` is enabled
@@ -79,11 +79,14 @@ macro_rules! function {
 }
 
 mod ext; use ext::*;
+mod errors;
 mod sys;
 use sys::{
     try_get_size,
     tell_file,
 };
+
+mod exec;
 
 mod buffers;
 use buffers::prelude::*;
@@ -116,7 +119,6 @@ mod args;
 trait ModeReturn: Send {
     
 }
-
 
 fn init() -> eyre::Result<()>
 {
@@ -486,7 +488,6 @@ mod work {
     }
 }
 
-
 #[cfg_attr(feature="logging", instrument(err))]
 #[inline(always)]
 unsafe fn close_raw_fileno(fd: RawFd) -> io::Result<()>
@@ -529,7 +530,7 @@ fn parse_args() -> eyre::Result<args::Options>
 }
 
 #[cfg_attr(feature="logging", instrument(err))]
-fn main() -> eyre::Result<()> {
+fn main() -> errors::DispersedResult<()> {
     init()?;
     feature_check()?;
     if_trace!(debug!("initialised"));

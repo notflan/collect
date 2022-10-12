@@ -110,7 +110,7 @@ impl RawFile
     }
 
     #[inline(always)] 
-    const fn take_ownership_of_unchecked(fd: RawFd) -> Self
+    pub(crate) const fn take_ownership_of_unchecked(fd: RawFd) -> Self
     {
 	//! **Internal**: Non-`unsafe` and `const` version of `take_ownership_of_raw_unchecked()`
 	//! : assumes `fd` is `>= 0`
