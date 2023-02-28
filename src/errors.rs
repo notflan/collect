@@ -1,24 +1,28 @@
 //! Errors and helpers for errors.
+//TODO: Comment how this works (controllably optional simple or complex `main()` error messages.)
 use super::*;
 use std::{
     fmt,
     error,
 };
+use std::os::unix::prelude::*;
 
 pub const DEFAULT_USE_ENV: bool = std::option_env!("NO_RT_ERROR_CTL").is_none();
 
 pub type DispersedResult<T, const USE_ENV: bool = DEFAULT_USE_ENV> = Result<T, Dispersed<USE_ENV>>;
 
 pub const ENV_NAME: &'static str = "RUST_VERBOSE";
-const DEFAULT_ENV_VERBOSE: DispersedVerbosity = match std::option_env!("DEFAULT_ERROR") {
-    Some("1") |
-    Some("V") |
-    Some("verbose") |
-    Some("VERBOSE") |
-    Some("v") => DispersedVerbosity::Verbose,
-    Some("0") |
-    _ => DispersedVerbosity::static_default(),
-};
+lazy_static!{
+    static ref DEFAULT_ENV_VERBOSE: DispersedVerbosity = match std::option_env!("DEFAULT_ERROR") {
+	Some("1") |
+	Some("V") |
+	Some("verbose") |
+	Some("VERBOSE") |
+	Some("v") => DispersedVerbosity::Verbose,
+	Some("0") |
+	_ => DispersedVerbosity::static_default(),
+    };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 #[repr(u8)]
@@ -43,7 +47,7 @@ impl Default for DispersedVerbosity
     #[inline]
     fn default() -> Self
     {
-	DEFAULT_ENV_VERBOSE
+	*DEFAULT_ENV_VERBOSE
     }
 }
 
@@ -68,13 +72,13 @@ fn get_env_value() -> DispersedVerbosity
     match std::env::var_os(ENV_NAME) {
 	Some(mut value) => {
 	    value.make_ascii_lowercase();
-	    match value {
-		"1" |
-		"v" |
-		"verbose" => DispersedVerbosity::Verbose,
-		"0" |
-		"s" |
-		"simple" => DispersedVerbosity::Simple,
+	    match value.as_bytes() {
+		b"1" |
+		b"v" |
+		b"verbose" => DispersedVerbosity::Verbose,
+		b"0" |
+		b"s" |
+		b"simple" => DispersedVerbosity::Simple,
 		_ => DispersedVerbosity::default(),
 	    }
 	},
@@ -115,7 +119,7 @@ impl<const E: bool> Dispersed<E>
 impl Dispersed<false>
 {
     #[inline(always)] 
-    pub const fn obey_env(self) -> Dispersed<true>
+    pub fn obey_env(self) -> Dispersed<true>
     {
 	Dispersed(self.0)
     }
@@ -124,16 +128,16 @@ impl Dispersed<false>
 impl Dispersed<true>
 {
     #[inline(always)]
-    pub const fn ignore_env(self) -> Dispersed<false>
+    pub fn ignore_env(self) -> Dispersed<false>
     {
-	Dispersed(self.1)
+	Dispersed(self.0)
     }
 }
 
 impl<const E: bool> Dispersed<E>
 {
     #[inline(always)] 
-    pub const fn set_env<const To: bool>(self) -> Dispersed<To>
+    pub fn set_env<const To: bool>(self) -> Dispersed<To>
     {
 	Dispersed(self.0)
     }
@@ -143,14 +147,14 @@ impl error::Error for Dispersed<true>
 {
     #[inline] 
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-	self.0
+	self.0.source()
     }
 }
 impl error::Error for Dispersed<false>
 {
     #[inline] 
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-	self.0
+	self.0.source()
     }
 }
 

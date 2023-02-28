@@ -1,3 +1,4 @@
+//#![feature(const_trait_impl)]
 
 #[macro_use] extern crate cfg_if;
 #[cfg(feature="logging")] 
@@ -32,8 +33,8 @@ macro_rules! if_trace {
 		$(
 		    #[cfg(not(feature="logging"))]
 		    let val = { $no };
-		    )?
-		val
+		)?
+		    val
 	    }
 	}
     };
@@ -168,6 +169,25 @@ fn feature_check() -> eyre::Result<()>
     }
 
     Ok(())
+}
+
+#[inline] 
+fn try_seal_size<F: AsRawFd + ?Sized>(file: &F) -> eyre::Result<()>
+{
+    //if cfg!(feature="exec") {
+    if let Err(err) = file.try_seal(true,true,false)
+        .with_section(|| format!("Raw file descriptor: {}", file.as_raw_fd()).header("Attempted seal was on"))
+	.with_warning(|| "This may cause consumers of -exec{} to misbehave") {
+	    let fd = file.as_raw_fd();
+	    if_trace!{{
+		warn!("Failed to seal file descriptor {fd}: {err}");
+		eprintln!("\t{err:?}");
+	    }}
+	    Err(err).wrap_err("Failed to seal file's length")
+	} else {
+	    Ok(())
+	}
+    //}
 }
 
 mod work {
@@ -467,6 +487,9 @@ mod work {
 	};
 	if_trace!(info!("collected {} from stdin. starting write.", read));
 
+	// Seal memfile
+	let _ = try_seal_size(&file);
+
 	// TODO: XXX: Currently causes crash. But if we can get this to work, leaving this in is definitely safe (as opposed to the pre-setting (see above.))
 	set_stdout_len(read)
 	    .wrap_err(eyre!("Failed to `ftruncate()` stdout after collection of {read} bytes"))
@@ -488,7 +511,7 @@ mod work {
     }
 }
 
-#[cfg_attr(feature="logging", instrument(err))]
+#[cfg_attr(feature="logging", instrument(err))] 
 #[inline(always)]
 unsafe fn close_raw_fileno(fd: RawFd) -> io::Result<()>
 {

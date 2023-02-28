@@ -348,3 +348,72 @@ where F: FnOnce() -> T
 	}
     }
 }
+
+#[inline(always)] 
+pub(crate) fn map_bool<T>(ok: bool, value: T) -> T
+where T: Default
+{
+    if ok {
+	value
+    } else {
+	T::default()
+    }
+}
+pub trait SealExt
+{
+    fn try_seal(&self, shrink: bool, grow: bool, write: bool) -> io::Result<()>;
+
+    #[inline] 
+    fn sealed(self, shrink: bool, grow: bool, write: bool) -> Self
+    where Self: Sized {
+	if let Err(e) = self.try_seal(shrink, grow, write) {
+	    panic!("Failed to apply seals: {}", io::Error::last_os_error())
+	}
+	self
+    }
+}
+#[cfg(any(feature="memfile", feature="exec"))]
+const _: () = {
+    impl<T: AsRawFd + ?Sized> SealExt for T
+    {
+	#[cfg_attr(feature="logging", instrument(skip(self)))] 
+	fn sealed(self, shrink: bool, grow: bool, write: bool) -> Self
+	where Self: Sized {
+	    use libc::{
+		F_SEAL_GROW, F_SEAL_SHRINK, F_SEAL_WRITE,
+		F_ADD_SEALS,
+		fcntl
+	    };
+	    let fd = self.as_raw_fd();
+	    if unsafe {
+		fcntl(fd, F_ADD_SEALS
+		      , map_bool(shrink, F_SEAL_SHRINK)
+		      | map_bool(grow, F_SEAL_GROW)
+		      | map_bool(write, F_SEAL_WRITE))
+	    } < 0 {
+		panic!("Failed to apply seals to file descriptor {fd}: {}", io::Error::last_os_error())
+	    } 
+	    self	
+	}
+	
+	#[cfg_attr(feature="logging", instrument(skip(self), err))] 
+	fn try_seal(&self, shrink: bool, grow: bool, write: bool) -> io::Result<()> {
+	    use libc::{
+		F_SEAL_GROW, F_SEAL_SHRINK, F_SEAL_WRITE,
+		F_ADD_SEALS,
+		fcntl
+	    };
+	    let fd = self.as_raw_fd();
+	    if unsafe {
+		fcntl(fd, F_ADD_SEALS
+		      , map_bool(shrink, F_SEAL_SHRINK)
+		      | map_bool(grow, F_SEAL_GROW)
+		      | map_bool(write, F_SEAL_WRITE))
+	    } < 0 {
+		Err(io::Error::last_os_error())
+	    } else {
+		Ok(())
+	    }
+	}
+    }
+};

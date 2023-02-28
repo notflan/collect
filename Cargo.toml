@@ -24,7 +24,7 @@ default = ["mode-memfile", "logging"]
 
 # Mode: default
 # Use physical-memory backed kernel file-descriptors. (see feature `memfile`.)
-mode-memfile = ["memfile-preallocate"] #, "tracing/release_max_level_warn"]
+mode-memfile = ["memfile"] #, "tracing/release_max_level_warn"]
 
 # Mode: alternative
 # Use non-physical memory allocated buffers.
