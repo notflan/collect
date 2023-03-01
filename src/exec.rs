@@ -92,20 +92,29 @@ pub fn spawn_from<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> impl In
 /// Spawn all `-exec/{}` commands and wait for all children to complete.
 ///
 /// # Returns
-/// An iterator of the result of spawning each child and its exit status.
+/// An iterator of the result of spawning each child and its exit status (if one exists)
+///
+/// If the child exited via a signal termination, or another method that does not return a status, the iterator's result will be `Ok(None)`
 #[inline] 
-pub fn spawn_from_sync<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> impl IntoIterator<Item = io::Result<i32>> + 'a
+pub fn spawn_from_sync<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> impl IntoIterator<Item = eyre::Result<Option<i32>>> + 'a
 {
-    spawn_from(file, opt).into_iter().map(move |child| -> io::Result<_> {
+    spawn_from(file, opt).into_iter().zip(0..).map(move |(child, idx)| -> eyre::Result<_> {
+	
+	let idx = move || idx.to_string().header("");
 	match child {
 	    Ok(mut child) => {
-		Ok(child.wait()?.code().unwrap_or(-1))
+		Ok(child.wait()
+		   .wrap_err("Failed to wait on child")
+		   .with_note(|| "The child may have detached itself")
+		   .with_section(idx)?
+		   .code())
 	    },
 	    Err(err) => {
 		if_trace!(error!("Failed to spawn child: {err}"));
 		Err(err)
+		    .wrap_err("Failed to spawn child")
 	    }
-	}
+	}.with_section(idx)
     })
     //todo!("Map `spawn_from(...)` and wait for each child to terminate concurrently. Then return an iterator or the return codes or spawning errors for that now terminated child.")
 }

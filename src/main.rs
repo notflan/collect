@@ -172,6 +172,7 @@ fn feature_check() -> eyre::Result<()>
 }
 
 #[inline] 
+    #[cfg_attr(feature="logging", instrument(skip_all, fields(fd = ?file.as_raw_fd())))]
 fn try_seal_size<F: AsRawFd + ?Sized>(file: &F) -> eyre::Result<()>
 {
     //if cfg!(feature="exec") {
@@ -180,8 +181,7 @@ fn try_seal_size<F: AsRawFd + ?Sized>(file: &F) -> eyre::Result<()>
 	.with_warning(|| "This may cause consumers of -exec{} to misbehave") {
 	    let fd = file.as_raw_fd();
 	    if_trace!{{
-		warn!("Failed to seal file descriptor {fd}: {err}");
-		eprintln!("\t{err:?}");
+		warn!("Failed to seal file descriptor {fd}: {err}\n\t{err:?}");
 	    }}
 	    Err(err).wrap_err("Failed to seal file's length")
 	} else {
