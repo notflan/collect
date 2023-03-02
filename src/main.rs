@@ -87,6 +87,7 @@ use sys::{
     tell_file,
 };
 
+#[cfg(feature="exec")] 
 mod exec;
 
 mod buffers;
@@ -600,15 +601,20 @@ fn main() -> errors::DispersedResult<()> {
     if_trace!(debug!("initialised"));
 
     //TODO: How to cleanly feature-gate `args`?
-    let opt = {
-	#[cfg(feature="logging")]
-	let _span = debug_span!("args");
-	#[cfg(feature="logging")]
-	let _in_span = _span.enter();
-	let parsed = parse_args()?;
-	if_trace!(debug!("Parsed arguments: {parsed:?}"));
-	parsed
-    };
+    
+    let opt = { cfg_if!{
+	if #[cfg(feature="exec")] {
+	    #[cfg(feature="logging")]
+	    let _span = debug_span!("args");
+	    #[cfg(feature="logging")]
+	    let _in_span = _span.enter();
+	    let parsed = parse_args()?;
+	    if_trace!(debug!("Parsed arguments: {parsed:?}"));
+	    parsed
+	} else {
+	    ()
+	}
+    } };
 
     //TODO: maybe look into fd SEALing? Maybe we can prevent a consumer process from reading from stdout until we've finished the transfer. The name SEAL sounds like it might have something to do with that?
     let execfile;
@@ -621,17 +627,25 @@ fn main() -> errors::DispersedResult<()> {
 		.wrap_err("Operation failed").with_note(|| "Strategy was `buffered`")?;
 	}
     }
-    // Transfer complete, run exec.
-    let rc = if let Some(file) = execfile.get_exec_file() {
-	exec::spawn_from_sync(&file, opt).into_iter().try_fold(0i32, |opt, res| res.map(|x| opt | x.unwrap_or(0)))
-    } else {
-	if_trace!(debug!("there is no file to apply potential -exec/{{}} to"));
-	Ok(0i32)
-    }.wrap_err("-exec/{} operations failed")?;
-    if_trace!(match rc {
-	0 => trace!("-exec/{{}} operation(s all) returned 0 exit status"),
-	n => error!("-exec/{{}} operation(s) returned non-zero exit code (total: {}) or were killed by signal", n),
-    });
+    // Transfer complete, run exec if enabled
+    
+    let rc = { cfg_if! {
+	if #[cfg(feature="exec")] {
+	    let rc = if let Some(file) = execfile.get_exec_file() {
+		exec::spawn_from_sync(&file, opt).into_iter().try_fold(0i32, |opt, res| res.map(|x| opt | x.unwrap_or(0)))
+	    } else {
+		if_trace!(debug!("there is no file to apply potential -exec/{{}} to"));
+		Ok(0i32)
+	    }.wrap_err("-exec/{} operations failed")?;
+	    if_trace!(match rc {
+		0 => trace!("-exec/{{}} operation(s all) returned 0 exit status"),
+		n => error!("-exec/{{}} operation(s) returned non-zero exit code (total: {}) or were killed by signal", n),
+	    });
+	    rc
+	} else {
+	    0i32
+	}
+    } };
 
     // Now that transfer is complete from buffer to `stdout`, close `stdout` pipe before exiting process.
     if_trace!(info!("Transfer complete, closing `stdout` pipe"));
@@ -644,7 +658,9 @@ fn main() -> errors::DispersedResult<()> {
     }.wrap_err(eyre!("Failed to close stdout"))?;
 
     if rc != 0 {
-	if_trace!(error!("Exiting with non-zero code due to child(s) returning non-zero exit status")); //TODO: A flag to disable this? TODO: Also, a flag to stop printing to stdout so consumers of output can use just `-exec/{}` child process `stdout`s is enabled 
+	if cfg!(feature="exec") {
+	    if_trace!(error!("Exiting with non-zero code due to child(s) returning non-zero exit status")); //TODO: A runtime flag to disable this? TODO: Also, a flag to stop printing to stdout so consumers of output can use just `-exec/{}` child process `stdout`s is enabled
+	}
 	std::process::exit(rc);
     }
     

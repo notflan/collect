@@ -18,9 +18,12 @@ license = "GPL-3.0-or-later"
 #
 # # Logging
 # Tracing can be disabled at compile-time for higher performance by disabling the `logging` feature (see above, but remove `,logging` from the features.)
-default = ["mode-memfile", "logging"]
+default = ["mode-memfile", "mode-flags", "logging"]
 
 ## --- Modes --- ##
+
+# Enable all flag options
+mode-flags = ["exec"]
 
 # Mode: default
 # Use physical-memory backed kernel file-descriptors. (see feature `memfile`.)
@@ -31,6 +34,9 @@ mode-memfile = ["memfile"] #, "tracing/release_max_level_warn"]
 mode-buffered = ["jemalloc", "bytes"]
 
 ## --- Individual features --- ##
+
+# Enable `-exec/{}` flag options
+exec = []
 
 # Use an in-memory file for storage instead of a byte-buffer.
 #
