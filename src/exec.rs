@@ -15,6 +15,8 @@ use std::{
 };
 
 /// Get a path to the file-descriptor refered to by `file`.
+
+    #[cfg_attr(feature="logging", instrument(skip_all, fields(fd = ?file.as_raw_fd())))]
 fn proc_file<F: ?Sized + AsRawFd>(file: &F) -> PathBuf
 {
     let fd = file.as_raw_fd();
@@ -25,7 +27,9 @@ fn proc_file<F: ?Sized + AsRawFd>(file: &F) -> PathBuf
 }
 
 /// Attempt to `dup()` a file descriptor into a `RawFile`.
-#[inline] 
+#[inline]
+
+    #[cfg_attr(feature="logging", instrument(skip_all, err, fields(fd = ?file.as_raw_fd())))]
 fn dup_file<F: ?Sized + AsRawFd>(file: &F) -> io::Result<memfile::RawFile>
 {
     let fd = file.as_raw_fd();
@@ -41,10 +45,11 @@ fn dup_file<F: ?Sized + AsRawFd>(file: &F) -> io::Result<memfile::RawFile>
     Ok(memfile::RawFile::take_ownership_of_unchecked(fd))
 }
 
+    #[cfg_attr(feature="logging", instrument(skip_all, fields(has_stdin = ?file.is_some(), filename = ?filename.as_ref())))]
 fn run_stdin<I>(file: Option<impl Into<fs::File>>, filename: impl AsRef<OsStr>, args: I) -> io::Result<(process::Child, Option<fs::File>)>
 where I: IntoIterator<Item = OsString>,
 {
-    let mut file = {
+    let file = {
 	let file: Option<fs::File> = file.map(Into::into);
 	//TODO: Do we need to fcntl() this to make it (the fd) RW?
 	match file {
@@ -60,17 +65,18 @@ where I: IntoIterator<Item = OsString>,
 	}
     };
     
-    let mut child = process::Command::new(filename)
+    let child = process::Command::new(filename)
         .args(args)
-        .stdin(file.as_ref().map(|file| process::Stdio::piped()/*::from(file)*/).unwrap_or_else(|| process::Stdio::null())) //XXX: Maybe change to `piped()` and `io::copy()` from begining (using pread()/send_file()/copy_file_range()?)
+        .stdin(file.as_ref().map(|file| process::Stdio::from(fs::File::from(dup_file(file).unwrap()))).unwrap_or_else(|| process::Stdio::null())) //XXX: Maybe change to `piped()` and `io::copy()` from begining (using pread()/send_file()/copy_file_range()?)
         .stdout(process::Stdio::inherit())
         .stderr(process::Stdio::inherit())
         .spawn()?;
     //TODO: XXX: Why does `/proc/{pid}/fd/{fd}` **and** `/dev/fd/{fd}` not work for -exec{}, and why foes `Stdio::from(file)` not work for stdin even *afer* re-seeking the file???
+    /*
     if let Some((mut input, mut output)) = file.as_mut().zip(child.stdin.take()) {
 	io::copy(&mut input, &mut output)
 	    /*.wrap_err("Failed to pipe file into stdin for child")*/?;
-    }
+    }*/
     
     if_trace!(info!("Spawned child process: {}", child.id()));
     /*Ok(child.wait()?
@@ -84,6 +90,7 @@ where I: IntoIterator<Item = OsString>,
 ///
 /// The caller must wait for all child processes to exit before the parent does.
 #[inline]
+    #[cfg_attr(feature="logging", instrument(skip(file), err))]
 pub fn run_single<F: ?Sized + AsRawFd>(file: &F, opt: args::ExecMode) -> io::Result<(process::Child, Option<fs::File>)>
 {
     let input: std::mem::ManuallyDrop<memfile::RawFile> = std::mem::ManuallyDrop::new(dup_file(file)?);
@@ -102,10 +109,10 @@ pub fn run_single<F: ?Sized + AsRawFd>(file: &F, opt: args::ExecMode) -> io::Res
 ///
 /// # Returns
 /// An iterator of each (possibly running) spawned child, or the error that occoured when trying to spawn that child from the `exec` option in `opt`.
+    #[cfg_attr(feature="logging", instrument(skip(file)))]
 pub fn spawn_from<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> impl IntoIterator<Item = io::Result<(process::Child, Option<fs::File>)>> + 'a
 {
     opt.into_opt_exec().map(|x| run_single(file, x))
-    //todo!("Loop through `opt.into_exec()`, map the call to `|x| run_single(file, x)`, and return that iterator")
 }
 
 /// Spawn all `-exec/{}` commands and wait for all children to complete.
@@ -115,11 +122,12 @@ pub fn spawn_from<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> impl In
 ///
 /// If the child exited via a signal termination, or another method that does not return a status, the iterator's result will be `Ok(None)`
 #[inline] 
+    #[cfg_attr(feature="logging", instrument(skip(file)))]
 pub fn spawn_from_sync<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> impl IntoIterator<Item = eyre::Result<Option<i32>>> + 'a
 {
     spawn_from(file, opt).into_iter().zip(0..).map(move |(child, idx)| -> eyre::Result<_> {
 	
-	let idx = move || idx.to_string().header("");
+	let idx = move || idx.to_string().header("The child index");
 	match child {
 	    Ok(mut child) => {
 		Ok(child.0.wait()
@@ -135,5 +143,4 @@ pub fn spawn_from_sync<'a, F: ?Sized + AsRawFd>(file: &'a F, opt: Options) -> im
 	    }
 	}.with_section(idx)
     })
-    //todo!("Map `spawn_from(...)` and wait for each child to terminate concurrently. Then return an iterator or the return codes or spawning errors for that now terminated child.")
 }
