@@ -117,8 +117,44 @@ impl ModeReturn for BufferedReturn { fn get_fd_str(&self) -> &OsStr{ static_asse
 
 mod args;
 
+#[derive(Debug)]
+pub struct NoFile(std::convert::Infallible);
+
+impl AsRawFd for NoFile
+{
+    #[inline] 
+    fn as_raw_fd(&self) -> RawFd {
+	match self.0{}
+    }
+}
+
 trait ModeReturn: Send {
-    
+    type ExecFile: AsRawFd;
+    fn get_exec_file(self) -> Option<Self::ExecFile>;
+}
+
+impl ModeReturn for () {
+    type ExecFile = NoFile;
+    #[inline(always)] 
+    fn get_exec_file(self) -> Option<Self::ExecFile> {
+	None
+    }
+}
+
+impl ModeReturn for io::Stdout {
+    type ExecFile = Self;
+    #[inline(always)] 
+    fn get_exec_file(self) -> Option<Self::ExecFile> {
+	Some(self)
+    }
+}
+
+impl ModeReturn for std::fs::File {
+    type ExecFile = Self;
+    #[inline(always)]
+    fn get_exec_file(self) -> Option<Self::ExecFile> {
+	Some(self)
+    }
 }
 
 fn init() -> eyre::Result<()>
@@ -194,7 +230,7 @@ mod work {
     use super::*;
     #[cfg_attr(feature="logging", instrument(err))]
     #[inline] 
-    pub(super) fn buffered() -> eyre::Result<()>
+    pub(super) fn buffered() -> eyre::Result<impl ModeReturn>
     {
 	if_trace!(info!("strategy: allocated buffer"));
 	
@@ -211,8 +247,9 @@ mod work {
 	};
 	if_trace!(info!("collected {read} from stdin. starting write."));
 
+	let stdout = io::stdout();
 	let written = 
-	    io::copy(&mut (&bytes[..read]).reader() , &mut io::stdout().lock())
+	    io::copy(&mut (&bytes[..read]).reader() , &mut stdout.lock())
 	    .with_section(|| read.header("Bytes read"))
 	    .with_section(|| bytes.len().header("Buffer length (frozen)"))
 	    .with_section(|| format!("{:?}", &bytes[..read]).header("Read Buffer"))
@@ -225,14 +262,14 @@ mod work {
 		.wrap_err("Writing failed: size mismatch");
 	}
 	
-	Ok(())
+	Ok(stdout)
     }
 
     #[cfg_attr(feature="logging", instrument(err))]
     #[inline]
     #[cfg(feature="memfile")]
     //TODO: We should establish a max memory threshold for this to prevent full system OOM: Output a warning message if it exceeeds, say, 70-80% of free memory (not including used by this program (TODO: How do we calculate this efficiently?)), and fail with an error if it exceeds 90% of memory... Or, instead of using free memory as basis of the requirement levels on the max size of the memory file, use max memory? Or just total free memory at the start of program? Or check free memory each time (slow!! probably not this one...). Umm... I think basing it off total memory would be best; perhaps make the percentage levels user-configurable at compile time (and allow the user to set the memory value as opposed to using the total system memory at runtime.) or runtime (compile-time preffered; use that crate that lets us use TOML config files at comptime (find it pretty easy by looking through ~/work's rust projects, I've used it before.))
-    pub(super) fn memfd() -> eyre::Result<()>
+    pub(super) fn memfd() -> eyre::Result<impl ModeReturn>
     {
 	const DEFAULT_BUFFER_SIZE: fn () -> Option<std::num::NonZeroUsize> = || {
 	    cfg_if!{ 
@@ -490,6 +527,10 @@ mod work {
 	// Seal memfile
 	let _ = try_seal_size(&file);
 
+	
+	
+	// Now copy memfile to stdout
+	
 	// TODO: XXX: Currently causes crash. But if we can get this to work, leaving this in is definitely safe (as opposed to the pre-setting (see above.))
 	set_stdout_len(read)
 	    .wrap_err(eyre!("Failed to `ftruncate()` stdout after collection of {read} bytes"))
@@ -507,7 +548,7 @@ mod work {
 		.wrap_err("Writing failed: size mismatch");
 	}
 	
-	Ok(())
+	Ok(file)
     }
 }
 
@@ -570,16 +611,27 @@ fn main() -> errors::DispersedResult<()> {
     };
 
     //TODO: maybe look into fd SEALing? Maybe we can prevent a consumer process from reading from stdout until we've finished the transfer. The name SEAL sounds like it might have something to do with that?
+    let execfile;
     cfg_if!{ 
 	if #[cfg(feature="memfile")] {
-	    work::memfd()
+	    execfile = work::memfd()
 		.wrap_err("Operation failed").with_note(|| "Stragery was `memfd`")?;
 	} else {
-	    work::buffered()
+	    execfile = work::buffered()
 		.wrap_err("Operation failed").with_note(|| "Strategy was `buffered`")?;
 	}
     }
-    // Transfer complete
+    // Transfer complete, run exec.
+    let rc = if let Some(file) = execfile.get_exec_file() {
+	exec::spawn_from_sync(&file, opt).into_iter().try_fold(0i32, |opt, res| res.map(|x| opt | x.unwrap_or(0)))
+    } else {
+	if_trace!(debug!("there is no file to apply potential -exec/{{}} to"));
+	Ok(0i32)
+    }.wrap_err("-exec/{} operations failed")?;
+    if_trace!(match rc {
+	0 => trace!("-exec/{{}} operation(s all) returned 0 exit status"),
+	n => error!("-exec/{{}} operation(s) returned non-zero exit code (total: {}) or were killed by signal", n),
+    });
 
     // Now that transfer is complete from buffer to `stdout`, close `stdout` pipe before exiting process.
     if_trace!(info!("Transfer complete, closing `stdout` pipe"));
@@ -591,5 +643,9 @@ fn main() -> errors::DispersedResult<()> {
             .with_warning(|| format!("It is possible fd {} (STDOUT_FILENO) has already been closed; if so, look for where that happens and prevent it. `stdout` should be closed here.", stdout_fd).header("Possible bug"))
     }.wrap_err(eyre!("Failed to close stdout"))?;
 
+    if rc != 0 {
+	std::process::exit(rc);
+    }
+    
     Ok(())
 }

@@ -18,8 +18,9 @@ use std::{
 fn proc_file<F: ?Sized + AsRawFd>(file: &F) -> PathBuf
 {
     let fd = file.as_raw_fd();
-    let pid = process::id();
-    format!("/proc/{pid}/fd/{fd}").into()
+    //let pid = process::id();
+    //format!("/proc/{pid}/fd/{fd}").into()
+    format!("/dev/fd/{fd}").into()
 }
 
 /// Attempt to `dup()` a file descriptor into a `RawFile`.
@@ -43,15 +44,31 @@ fn run_stdin<I>(file: Option<impl Into<fs::File>>, filename: impl AsRef<OsStr>, 
 where I: IntoIterator<Item = OsString>,
 {
     let file = {
-	let mut file: Option<fs::File> = file.map(Into::into);
+	let file: Option<fs::File> = file.map(Into::into);
 	//TODO: Do we need to fcntl() this to make it (the fd) RW?
-	file
+	match file {
+	    None => None,
+	    Some(mut file) => {
+		use std::io::Seek;
+		if let Err(err) = file.seek(io::SeekFrom::Start(0)) {
+		    if_trace!(warn!("Failed to seed to start: {err}"));
+		}
+		let _ = try_seal_size(&file);
+		Some(file)
+	    },
+	}
     };
-    let child = process::Command::new(filename)
+    
+    let mut child = process::Command::new(filename)
         .args(args)
-        .stdin(file.map(|file| process::Stdio::from(file)).unwrap_or_else(|| process::Stdio::inherit()))
+        .stdin(file.as_ref().map(|file| process::Stdio::piped()/*::from(file)*/).unwrap_or_else(|| process::Stdio::null())) //XXX: Maybe change to `piped()` and `io::copy()` from begining (using pread()/send_file()/copy_file_range()?)
         .stdout(process::Stdio::inherit())
+        .stderr(process::Stdio::inherit())
         .spawn()?;
+    if let Some((mut input, mut output)) = file.zip(child.stdin.take()) {
+	io::copy(&mut input, &mut output)
+	    /*.wrap_err("Failed to pipe file into stdin for child")*/?;
+    }
     
     if_trace!(info!("Spawned child process: {}", child.id()));
     /*Ok(child.wait()?
