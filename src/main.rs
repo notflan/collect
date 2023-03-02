@@ -644,6 +644,7 @@ fn main() -> errors::DispersedResult<()> {
     }.wrap_err(eyre!("Failed to close stdout"))?;
 
     if rc != 0 {
+	if_trace!(error!("Exiting with non-zero code due to child(s) returning non-zero exit status")); //TODO: A flag to disable this? TODO: Also, a flag to stop printing to stdout so consumers of output can use just `-exec/{}` child process `stdout`s is enabled 
 	std::process::exit(rc);
     }
     
